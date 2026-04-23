@@ -115,6 +115,13 @@ fire_with_alerter() {
     # Omit --sound when SILENT=true (short-but-not-trivial tasks).
     local sound_args=()
     [[ "$SILENT" != "true" ]] && sound_args=(--sound "$SOUND")
+    # Whitelist jump triggers. alerter 26.5+ returns the close-label text
+    # ("Dismiss") instead of @CLOSED when the close button is used, so
+    # blacklisting sentinels isn't safe. Fire focus ONLY when the user
+    # either clicked the "Go to tab" action button, or clicked the
+    # notification body itself (alerter reports @CONTENTCLICKED).
+    # Keep ACTION_LABEL and --actions in sync.
+    local ACTION_LABEL="Go to tab"
     (
         action=$("$ALERTER" \
             --title "$TITLE" \
@@ -122,20 +129,27 @@ fire_with_alerter() {
             --message "$MESSAGE" \
             "${sound_args[@]}" \
             --group "$GROUP_ID" \
-            --actions "Go to tab" \
+            --actions "$ACTION_LABEL" \
             --timeout "$NOTIFY_TIMEOUT" \
             --close-label "Dismiss" 2>/dev/null)
         case "$action" in
-            @CLOSED|@TIMEOUT|"") ;;  # dismissed / ignored → do nothing
-            *) [[ -x "$FOCUS_SCRIPT" ]] && "$FOCUS_SCRIPT" "$SESSION_ID" ;;
+            "$ACTION_LABEL"|@CONTENTCLICKED)
+                [[ -x "$FOCUS_SCRIPT" ]] && "$FOCUS_SCRIPT" "$SESSION_ID"
+                ;;
         esac
     ) </dev/null >/dev/null 2>&1 &
     disown
 }
 
 fire_with_terminal_notifier() {
-    # Fallback if alerter is missing — relies on user's notification style
-    # being "Alerts" for click-through to work.
+    # Fallback if alerter is missing. Notification is fire-and-forget: we
+    # intentionally drop click-to-focus wiring on this path because
+    # terminal-notifier's -execute runs on ANY click (no way to
+    # differentiate dismiss from action — the same bug the alerter
+    # whitelist fixes). Better to degrade gracefully: user sees the
+    # notification and navigates to the tab manually.
+    # Also avoids a shell-injection surface from interpolating
+    # SESSION_ID into -execute's command string.
     local args=(
         -title "$TITLE"
         -subtitle "$SUBTITLE"
@@ -143,11 +157,6 @@ fire_with_terminal_notifier() {
         -group "$GROUP_ID"
     )
     [[ "$SILENT" != "true" ]] && args+=(-sound "$SOUND")
-    if [[ -x "$FOCUS_SCRIPT" ]]; then
-        args+=(-execute "$FOCUS_SCRIPT $SESSION_ID")
-    else
-        args+=(-activate "com.mitchellh.ghostty")
-    fi
     terminal-notifier "${args[@]}" >/dev/null 2>&1
 }
 
