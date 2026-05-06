@@ -18,7 +18,7 @@
 | `3 – 10 分钟` | **弹通知，无声** — 走神回来扫一眼通知中心就行 |
 | `≥ 10 分钟` | **弹通知 + Glass 提示音** — 你肯定走远了，得叫你 |
 
-`Notification` 事件（Claude 等输入 / 等权限）**永远立即出声通知**，不受耗时门槛限制 —— 它会卡住进度，越早叫你越好。
+只在任务完成（`Stop`）时弹。输入 / 权限请求（`Notification` 事件）**故意不处理** —— bypass-permissions 模式下它们很少出现，真触发了终端铃声也会响，已经够提示了。
 
 阈值都可自定义（env 变量）。
 
@@ -35,7 +35,7 @@
 - **精准定位 tab** —— 往终端 TTY 发 OSC 2 转义序列写入独特 marker，再通过 AppleScript 查 Ghostty 哪个 tab 的标题等于 marker，然后恢复原标题。即使同一项目目录开了几个 Claude session 也能区分。
 - **三级耗时门槛** —— 静默 / 静默通知 / 响铃通知，阈值可配置。
 - **不需要辅助功能权限** —— 用 Ghostty 原生 AppleScript `select tab` 命令，不靠按键模拟。
-- **免疫 Claude Code 和 plugin 升级** —— 纯 bash hook，你自己完全掌握，不依赖 `terminal-notifier -execute`（Banner 样式下经常静默失败）。
+- **免疫 Claude Code 和 plugin 升级** —— 纯 bash hook，你自己完全掌握。默认走 `alerter`（带 action 按钮，点击可靠），可以通过 env 变量强制 fallback 到 `terminal-notifier`。
 - **多会话感知** —— 按 Claude 的 `session_id` 做 key，多个并发会话互不干扰。
 
 ## 安装
@@ -95,8 +95,7 @@ cd claude-ghostty-notify
 | `GHOSTTY_NOTIFY_MIN_ELAPSED`   | `180`  | 低于这个秒数（3 分钟）：**静默** —— 完全不弹通知 |
 | `GHOSTTY_NOTIFY_SOUND_ELAPSED` | `600`  | 低于这个（10 分钟）但高于 MIN：**弹通知但无声** |
 | `GHOSTTY_NOTIFY_TIMEOUT`       | `1200` | 通知在屏幕上保留多久（20 分钟），到时自动消失 |
-
-`Notification` 事件（Claude 等输入 / 等权限）不受这些门槛限制，永远立即出声 —— 它会卡进度，时长无所谓。
+| `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto`（先 alerter，没有再 fallback 到 terminal-notifier）/ `alerter`（强制）/ `terminal-notifier`（强制）。如果 alerter 弹不出通知，设成 `terminal-notifier` —— 见排查那节 |
 
 **例子**：我想让超过 30 秒的任务都弹通知，但只有超过 5 分钟的才响铃，通知一直挂 20 分钟才消失：
 
@@ -112,10 +111,17 @@ cd claude-ghostty-notify
 
 ### 完全看不到通知
 
-1. Script Editor 的 **Alert Style** 改成 **Persistent** 了吗？（第 4 步）
-2. 改完 env 有没有**重启** Claude Code？（第 5 步）
+1. Script Editor 的 **Alert Style** 改成 **Persistent** 了吗？（第 3 步）
+2. 改完 env 有没有**重启** Claude Code？（第 4 步）
 3. macOS 的**勿扰 / 专注模式**开了吗？关掉再试。
 4. 检查 hook 跑过没：`ls ~/.claude/notifications/ghostty-sessions/`，应该能看到当前 session 的 `<session_id>.json` 和 `.start` 文件。
+5. **alerter 跑了但通知就是不显示** —— 通常是因为 Script Editor 这个 bundle 在系统设置里**从来没被授权过通知**。`alerter` 能正常跑完，但 macOS 静默丢了显示。解决：强制走 terminal-notifier 后端（它有自己独立的通知授权）：
+
+   ```json
+   "env": {
+     "GHOSTTY_NOTIFY_BACKEND": "terminal-notifier"
+   }
+   ```
 
 ### 同时弹两条通知，其中一条是 Script Editor 图标、内容是我的 assistant 回复文字
 
@@ -159,7 +165,7 @@ cd claude-ghostty-notify
 
 这套"marker 舞"每个 session 只跑一次（保存文件在就不重跑）。
 
-**Hook 2 —— `ghostty-notify.sh`（`Stop` 和 `Notification` 触发）：**
+**Hook 2 —— `ghostty-notify.sh`（`Stop` 触发）：**
 
 1. 读 `PreToolUse` 写的时间戳，算出任务耗时。
 2. 低于 `MIN_ELAPSED` 直接静默退出。

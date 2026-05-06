@@ -6,17 +6,6 @@
     "GHOSTTY_NOTIFY_TIMEOUT": "1200"
   },
   "hooks": {
-    "Notification": [
-      {
-        "matcher": "idle_prompt|permission_prompt",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/Users/YOUR_USERNAME/.claude/hooks/ghostty-notify.sh"
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "",

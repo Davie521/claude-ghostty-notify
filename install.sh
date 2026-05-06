@@ -70,10 +70,6 @@ cat <<'EOF'
       "GHOSTTY_NOTIFY_TIMEOUT": "600"
     },
     "hooks": {
-      "Notification": [{
-        "matcher": "idle_prompt|permission_prompt",
-        "hooks": [{"type": "command", "command": "/Users/$USER/.claude/hooks/ghostty-notify.sh"}]
-      }],
       "PreToolUse": [{
         "matcher": "",
         "hooks": [{"type": "command", "command": "/Users/$USER/.claude/hooks/ghostty-tab-save.sh"}]

@@ -18,7 +18,7 @@ Three tiers of notifications, so short tasks don't spam you:
 | `3 – 10 min` | **Notification, no sound** — glance at Notification Center if you wandered off |
 | `≥ 10 min` | **Notification with Glass sound** — you've clearly walked away, we'll wake you |
 
-`Notification` events (Claude waiting on input or permission) **always alert with sound**, regardless of elapsed time — they block progress.
+Only fires on task completion (`Stop`). Input / permission prompts (`Notification` events) are intentionally ignored — under bypass-permissions mode they're rare, and when they do fire, the terminal bell already covers them.
 
 The thresholds are all configurable via env vars.
 
@@ -35,7 +35,7 @@ This project:
 - **Precise tab identification** — writes a unique marker to the terminal's title via OSC 2, queries Ghostty via AppleScript to find which tab got the marker, then restores the title. Works even if you have several Claude sessions in the same project folder.
 - **Three-tier elapsed gate** — configurable silence/silent-notify/loud-notify thresholds.
 - **No accessibility permission required** — uses Ghostty's native AppleScript `select tab` command, not keystroke simulation.
-- **Immune to Claude Code & plugin updates** — pure bash hooks you own, no compiled binary, no reliance on `terminal-notifier -execute` which breaks on Banner-style notifications.
+- **Immune to Claude Code & plugin updates** — pure bash hooks you own, with `alerter` as the preferred backend (action-button-based clicks) and `terminal-notifier` as a fallback you can force via env var.
 - **Multi-session aware** — keys saved state by Claude's `session_id`, so several concurrent sessions each know their own tab.
 
 ## Installation
@@ -95,8 +95,7 @@ All three thresholds are controlled by environment variables in your `settings.j
 | `GHOSTTY_NOTIFY_MIN_ELAPSED`   | `180`  | Below this elapsed time (3 min): **silent** — no notification at all |
 | `GHOSTTY_NOTIFY_SOUND_ELAPSED` | `600`  | Below this (10 min) but above MIN: notification **without** sound |
 | `GHOSTTY_NOTIFY_TIMEOUT`       | `1200` | How long the notification stays on screen before auto-dismissing (20 min) |
-
-`Notification` events (Claude waiting for input/permission) ignore these gates and always alert with sound — they block progress, so duration doesn't matter.
+| `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto` (alerter then terminal-notifier), `alerter` (force), or `terminal-notifier` (force). Set to `terminal-notifier` if alerter notifications never appear — see Troubleshooting. |
 
 Example: notify on tasks > 30 seconds, sound on > 5 minutes, persist 20 minutes:
 
@@ -112,10 +111,17 @@ Example: notify on tasks > 30 seconds, sound on > 5 minutes, persist 20 minutes:
 
 ### I don't see any notifications
 
-1. Did you change Script Editor to **Persistent** alert style? (Step 4.)
-2. Did you restart Claude Code after adding the env vars? (Step 5.)
+1. Did you change Script Editor to **Persistent** alert style? (Step 3.)
+2. Did you restart Claude Code after adding the env vars? (Step 4.)
 3. Is macOS **Do Not Disturb / Focus** mode on? Turn it off and test again.
 4. Check the hooks ran: `ls ~/.claude/notifications/ghostty-sessions/` — you should see a `<session_id>.json` and `.start` file for the current session.
+5. **alerter notifications never appear (even though the script ran)** — this happens when Script Editor's bundle was never authorized for notifications in System Settings. `alerter` will run, exit cleanly, and macOS silently drops the visual. Fix by forcing the terminal-notifier backend (its bundle has its own notification authorization):
+
+   ```json
+   "env": {
+     "GHOSTTY_NOTIFY_BACKEND": "terminal-notifier"
+   }
+   ```
 
 ### I see two notifications (one with Script Editor icon showing my assistant message text)
 
@@ -159,7 +165,7 @@ Normal. `alerter` blocks until you click an action or the notification times out
 
 Only runs the expensive marker dance once per session (the save file is kept around).
 
-**Hook 2 — `ghostty-notify.sh` (runs on `Stop` and `Notification`):**
+**Hook 2 — `ghostty-notify.sh` (runs on `Stop`):**
 
 1. Reads the start timestamp from `PreToolUse`.
 2. Computes elapsed seconds; exits silently if below `MIN_ELAPSED`.
