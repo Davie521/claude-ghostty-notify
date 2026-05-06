@@ -14,11 +14,13 @@ Three tiers of notifications, so short tasks don't spam you:
 
 | Elapsed task time | What happens |
 |---|---|
-| `< 45 s` | **Silent** — no notification at all |
-| `45 s – 10 min` | **Notification, no sound** — glance at Notification Center if you wandered off |
+| `< 3 min` | **Silent** — no notification at all |
+| `3 – 10 min` | **Notification, no sound** — glance at Notification Center if you wandered off |
 | `≥ 10 min` | **Notification with Glass sound** — you've clearly walked away, we'll wake you |
 
-The thresholds are all configurable.
+`Notification` events (Claude waiting on input or permission) **always alert with sound**, regardless of elapsed time — they block progress.
+
+The thresholds are all configurable via env vars.
 
 ## Why this exists
 
@@ -47,15 +49,34 @@ brew install jq alerter
 - **jq** — parses the JSON Claude Code passes to hooks
 - **alerter** — shows persistent macOS notifications with action buttons (clicks aren't reliable on stock `terminal-notifier` banners)
 
-### 2. Install the hooks
+### 2. Install the plugin
 
-**One-liner:**
+Inside Claude Code, run:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Davie521/claude-ghostty-notify/main/install.sh | bash
+```
+/plugin marketplace add Davie521/claude-ghostty-notify
+/plugin install claude-ghostty-notify
 ```
 
-**Or clone and run:**
+That's it — hooks are auto-registered via the plugin manifest. **No manual `settings.json` edits needed.**
+
+### 3. Flip one macOS setting
+
+**System Settings → Notifications → Script Editor → Alert Style → Persistent**
+
+> Why Script Editor? `alerter` delivers notifications under the Script Editor bundle by default. **Persistent** style keeps the notification on screen until you dismiss it, and shows the **Go to tab** button directly. Banner style auto-hides and tucks the button behind a "Show" chevron — clicks won't reliably trigger.
+
+### 4. Restart Claude Code
+
+Quit and relaunch so the new hooks are loaded.
+
+You're done. Default thresholds (3 min / 10 min / 20 min timeout) work out of the box — see [Configuration](#configuration) to tune them.
+
+---
+
+### Manual install (without the plugin system)
+
+If you'd rather not use the plugin marketplace, the legacy installer still works:
 
 ```bash
 git clone https://github.com/Davie521/claude-ghostty-notify.git
@@ -63,61 +84,21 @@ cd claude-ghostty-notify
 ./install.sh
 ```
 
-The installer copies three scripts into `~/.claude/hooks/` and prints the settings snippet you need to merge.
-
-### 3. Register the hooks in `~/.claude/settings.json`
-
-Merge this into your existing `settings.json` (replace `YOUR_USERNAME` with your macOS username):
-
-```json
-{
-  "env": {
-    "GHOSTTY_NOTIFY_MIN_ELAPSED": "45",
-    "GHOSTTY_NOTIFY_SOUND_ELAPSED": "600",
-    "GHOSTTY_NOTIFY_TIMEOUT": "1200"
-  },
-  "hooks": {
-    "Notification": [{
-      "matcher": "idle_prompt|permission_prompt",
-      "hooks": [{"type": "command", "command": "/Users/YOUR_USERNAME/.claude/hooks/ghostty-notify.sh"}]
-    }],
-    "PreToolUse": [{
-      "matcher": "",
-      "hooks": [{"type": "command", "command": "/Users/YOUR_USERNAME/.claude/hooks/ghostty-tab-save.sh"}]
-    }],
-    "Stop": [{
-      "matcher": "",
-      "hooks": [{"type": "command", "command": "/Users/YOUR_USERNAME/.claude/hooks/ghostty-notify.sh"}]
-    }]
-  }
-}
-```
-
-A full example is in [example-settings.json](./example-settings.json).
-
-### 4. Flip one macOS setting
-
-**System Settings → Notifications → Script Editor → Alert Style → Persistent**
-
-> Why Script Editor? `alerter` delivers notifications under the Script Editor bundle by default. **Persistent** style keeps the notification on screen until you dismiss it, and shows the **Go to tab** button directly. Banner style auto-hides and tucks the button behind a "Show" chevron — clicks won't reliably trigger.
-
-### 5. Restart Claude Code
-
-Env variables in `settings.json` are read at startup. Quit and relaunch Claude Code to pick up the three threshold values.
-
-You're done.
+It copies the hooks to `~/.claude/hooks/` and prints a `settings.json` snippet to merge manually. See [example-settings.json](./example-settings.json) for the exact JSON.
 
 ## Configuration
 
-All three thresholds are controlled by environment variables in your `settings.json` `env` block. Restart Claude Code for changes to take effect.
+All three thresholds are controlled by environment variables in your `settings.json` `env` block. Restart Claude Code for changes to take effect. Defaults are tuned for a workflow where most tasks finish under 3 minutes — only longer tasks get notifications.
 
 | Variable | Default | What it means |
 |---|---:|---|
-| `GHOSTTY_NOTIFY_MIN_ELAPSED`   | `60`  | Below this elapsed time: **silent** — no notification at all |
-| `GHOSTTY_NOTIFY_SOUND_ELAPSED` | `300` | Below this (but above MIN): notification **without** sound |
-| `GHOSTTY_NOTIFY_TIMEOUT`       | `120` | How long the notification stays on screen before auto-dismissing (seconds) |
+| `GHOSTTY_NOTIFY_MIN_ELAPSED`   | `180`  | Below this elapsed time (3 min): **silent** — no notification at all |
+| `GHOSTTY_NOTIFY_SOUND_ELAPSED` | `600`  | Below this (10 min) but above MIN: notification **without** sound |
+| `GHOSTTY_NOTIFY_TIMEOUT`       | `1200` | How long the notification stays on screen before auto-dismissing (20 min) |
 
-Example: I want to see notifications for any task > 30 seconds, but only hear sound for tasks > 5 minutes, and have notifications persist for 20 minutes before they vanish:
+`Notification` events (Claude waiting for input/permission) ignore these gates and always alert with sound — they block progress, so duration doesn't matter.
+
+Example: notify on tasks > 30 seconds, sound on > 5 minutes, persist 20 minutes:
 
 ```json
 "env": {
@@ -199,6 +180,16 @@ Only runs the expensive marker dance once per session (the save file is kept aro
 - **Why `alerter` and not `terminal-notifier`?** On modern macOS, Banner-style notifications silently drop `-execute` clicks. `alerter` is alert-style by design and uses explicit action buttons, which work reliably.
 
 ## Uninstall
+
+**Plugin install:**
+
+```
+/plugin uninstall claude-ghostty-notify
+```
+
+That's it — hooks are automatically deregistered.
+
+**Manual install:**
 
 ```bash
 rm -f ~/.claude/hooks/ghostty-tab-save.sh \

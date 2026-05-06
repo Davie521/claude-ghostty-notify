@@ -14,11 +14,13 @@
 
 | 任务耗时 | 行为 |
 |---|---|
-| `< 45 秒` | **完全静默** — 不弹通知 |
-| `45 秒 – 10 分钟` | **弹通知，无声** — 走神回来扫一眼通知中心就行 |
+| `< 3 分钟` | **完全静默** — 不弹通知 |
+| `3 – 10 分钟` | **弹通知，无声** — 走神回来扫一眼通知中心就行 |
 | `≥ 10 分钟` | **弹通知 + Glass 提示音** — 你肯定走远了，得叫你 |
 
-阈值都可自定义。
+`Notification` 事件（Claude 等输入 / 等权限）**永远立即出声通知**，不受耗时门槛限制 —— 它会卡住进度，越早叫你越好。
+
+阈值都可自定义（env 变量）。
 
 ## 为什么要用这个
 
@@ -47,15 +49,34 @@ brew install jq alerter
 - **jq** —— 解析 Claude Code 喂给 hook 的 JSON
 - **alerter** —— 显示可点击 action 按钮的 persistent 样式通知（原生 `terminal-notifier` 在 Banner 样式下 click 不稳定）
 
-### 2. 装 hook 脚本
+### 2. 装插件
 
-**一行装：**
+在 Claude Code 里跑：
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Davie521/claude-ghostty-notify/main/install.sh | bash
+```
+/plugin marketplace add Davie521/claude-ghostty-notify
+/plugin install claude-ghostty-notify
 ```
 
-**或者克隆再装：**
+完事 —— hook 通过插件 manifest 自动注册，**不需要手动改 `settings.json`**。
+
+### 3. 改一个 macOS 系统设置
+
+**系统设置 → 通知 → Script Editor → 提醒样式 → 提醒 (Persistent)**
+
+> 为什么是 Script Editor？`alerter` 默认挂在 Script Editor 这个 bundle 下发通知。**提醒 (Persistent)** 样式会让通知留在屏幕上、直接显示 **Go to tab** 按钮。**横幅 (Banner)** 样式通知一闪即逝，按钮会藏在 "Show" 折叠菜单里，点击不稳定。
+
+### 4. 重启 Claude Code
+
+退出 Claude Code 再打开，新 hook 才会被加载。
+
+搞定。默认阈值（3 分钟 / 10 分钟 / 20 分钟超时）开箱即用，想调见 [配置](#配置)。
+
+---
+
+### 手动安装（不用插件系统）
+
+不想走 plugin marketplace 也行，老的安装器还在：
 
 ```bash
 git clone https://github.com/Davie521/claude-ghostty-notify.git
@@ -63,59 +84,19 @@ cd claude-ghostty-notify
 ./install.sh
 ```
 
-安装器会把 3 个脚本拷到 `~/.claude/hooks/`，然后把你需要合并到 settings.json 的片段打印出来。
-
-### 3. 在 `~/.claude/settings.json` 注册 hook
-
-把下面这段合到你现有的 `settings.json`（把 `YOUR_USERNAME` 换成你的 macOS 用户名）：
-
-```json
-{
-  "env": {
-    "GHOSTTY_NOTIFY_MIN_ELAPSED": "45",
-    "GHOSTTY_NOTIFY_SOUND_ELAPSED": "600",
-    "GHOSTTY_NOTIFY_TIMEOUT": "1200"
-  },
-  "hooks": {
-    "Notification": [{
-      "matcher": "idle_prompt|permission_prompt",
-      "hooks": [{"type": "command", "command": "/Users/YOUR_USERNAME/.claude/hooks/ghostty-notify.sh"}]
-    }],
-    "PreToolUse": [{
-      "matcher": "",
-      "hooks": [{"type": "command", "command": "/Users/YOUR_USERNAME/.claude/hooks/ghostty-tab-save.sh"}]
-    }],
-    "Stop": [{
-      "matcher": "",
-      "hooks": [{"type": "command", "command": "/Users/YOUR_USERNAME/.claude/hooks/ghostty-notify.sh"}]
-    }]
-  }
-}
-```
-
-完整示例见 [example-settings.json](./example-settings.json)。
-
-### 4. 改一个 macOS 系统设置
-
-**系统设置 → 通知 → Script Editor → 提醒样式 → 提醒 (Persistent)**
-
-> 为什么是 Script Editor？`alerter` 默认挂在 Script Editor 这个 bundle 下发通知。**提醒 (Persistent)** 样式会让通知留在屏幕上、直接显示 **Go to tab** 按钮。**横幅 (Banner)** 样式通知一闪即逝，按钮会藏在 "Show" 折叠菜单里，点击不稳定。
-
-### 5. 重启 Claude Code
-
-`settings.json` 里的 env 变量只在启动时读。退出 Claude Code 再打开，三个阈值才生效。
-
-搞定。
+它会把 hook 拷到 `~/.claude/hooks/`，并打印需要手动合并到 `settings.json` 的片段。完整示例见 [example-settings.json](./example-settings.json)。
 
 ## 配置
 
-三个阈值都是 `settings.json` `env` 块里的环境变量。**改完要重启 Claude Code 才生效。**
+三个阈值都是 `settings.json` `env` 块里的环境变量。**改完要重启 Claude Code 才生效。** 默认值针对"大部分任务在 3 分钟内完成"的工作流调过，只有更长的任务才会弹通知。
 
 | 变量 | 默认值 | 含义 |
 |---|---:|---|
-| `GHOSTTY_NOTIFY_MIN_ELAPSED`   | `60`  | 低于这个秒数：**静默** —— 完全不弹通知 |
-| `GHOSTTY_NOTIFY_SOUND_ELAPSED` | `300` | 低于这个（高于 MIN）：**弹通知但无声** |
-| `GHOSTTY_NOTIFY_TIMEOUT`       | `120` | 通知在屏幕上保留多久（秒），到时自动消失 |
+| `GHOSTTY_NOTIFY_MIN_ELAPSED`   | `180`  | 低于这个秒数（3 分钟）：**静默** —— 完全不弹通知 |
+| `GHOSTTY_NOTIFY_SOUND_ELAPSED` | `600`  | 低于这个（10 分钟）但高于 MIN：**弹通知但无声** |
+| `GHOSTTY_NOTIFY_TIMEOUT`       | `1200` | 通知在屏幕上保留多久（20 分钟），到时自动消失 |
+
+`Notification` 事件（Claude 等输入 / 等权限）不受这些门槛限制，永远立即出声 —— 它会卡进度，时长无所谓。
 
 **例子**：我想让超过 30 秒的任务都弹通知，但只有超过 5 分钟的才响铃，通知一直挂 20 分钟才消失：
 
@@ -199,6 +180,16 @@ cd claude-ghostty-notify
 - **为什么用 `alerter` 而不是 `terminal-notifier`？** 新版 macOS 在 Banner 样式下会静默丢掉 `terminal-notifier -execute` 的点击事件。`alerter` 本身就是 alert 样式 + 明确的 action 按钮，点击可靠。
 
 ## 卸载
+
+**插件方式安装的：**
+
+```
+/plugin uninstall claude-ghostty-notify
+```
+
+完事 —— hook 自动注销。
+
+**手动安装的：**
 
 ```bash
 rm -f ~/.claude/hooks/ghostty-tab-save.sh \

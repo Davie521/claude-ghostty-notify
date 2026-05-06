@@ -1,0 +1,21 @@
+{
+  "name": "claude-ghostty-notify",
+  "version": "0.2.0",
+  "description": "Ghostty-native notifications for Claude Code: time-tiered alerts (silent under 3min, no-sound 3-10min, with sound over 10min) and click-to-jump tab focus",
+  "author": {
+    "name": "Davie521",
+    "url": "https://github.com/Davie521"
+  },
+  "homepage": "https://github.com/Davie521/claude-ghostty-notify",
+  "repository": "https://github.com/Davie521/claude-ghostty-notify",
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "ghostty",
+    "notifications",
+    "macos",
+    "hooks",
+    "terminal-notifier",
+    "alerter"
+  ]
+}

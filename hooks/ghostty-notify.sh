@@ -31,9 +31,9 @@ START_FILE="$SAVE_DIR/${SESSION_ID}.start"
 #   MIN_ELAPSED   — below this: completely silent (no notification)
 #   SOUND_ELAPSED — below this but above MIN: notification WITHOUT sound
 #                   at/above: notification WITH sound
-MIN_ELAPSED="${GHOSTTY_NOTIFY_MIN_ELAPSED:-60}"
-SOUND_ELAPSED="${GHOSTTY_NOTIFY_SOUND_ELAPSED:-300}"
-NOTIFY_TIMEOUT="${GHOSTTY_NOTIFY_TIMEOUT:-120}"
+MIN_ELAPSED="${GHOSTTY_NOTIFY_MIN_ELAPSED:-180}"
+SOUND_ELAPSED="${GHOSTTY_NOTIFY_SOUND_ELAPSED:-600}"
+NOTIFY_TIMEOUT="${GHOSTTY_NOTIFY_TIMEOUT:-1200}"
 
 NOW=$(date +%s)
 START=0
@@ -47,15 +47,23 @@ clear_start_on_stop() {
     esac
 }
 
-# Below the MIN threshold → completely silent, skip notification.
-if [[ "$START" -le 0 ]] || (( ELAPSED < MIN_ELAPSED )); then
-    clear_start_on_stop
-    exit 0
-fi
-
-# Between MIN and SOUND → notify silently (no audio).
+# Notification events (idle_prompt / permission_prompt) bypass the elapsed
+# gates entirely: under bypass-permissions mode they are rare but always
+# blocking, so we want to alert immediately with sound regardless of duration.
 SILENT=false
-(( ELAPSED < SOUND_ELAPSED )) && SILENT=true
+case "$HOOK_EVENT" in
+    Notification|notification)
+        :  # always notify with sound
+        ;;
+    *)
+        # Stop events: apply the two-tier elapsed gating.
+        if [[ "$START" -le 0 ]] || (( ELAPSED < MIN_ELAPSED )); then
+            clear_start_on_stop
+            exit 0
+        fi
+        (( ELAPSED < SOUND_ELAPSED )) && SILENT=true
+        ;;
+esac
 
 # ── Rate limit (avoid spam from parallel sub-agents) ──────────────────────
 RATE_DIR="$HOME/.claude/notifications/state"

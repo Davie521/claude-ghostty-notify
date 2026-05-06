@@ -1,10 +1,4 @@
 {
-  "$schema": "https://json.schemastore.org/claude-code-settings.json",
-  "env": {
-    "GHOSTTY_NOTIFY_MIN_ELAPSED": "180",
-    "GHOSTTY_NOTIFY_SOUND_ELAPSED": "600",
-    "GHOSTTY_NOTIFY_TIMEOUT": "1200"
-  },
   "hooks": {
     "Notification": [
       {
@@ -12,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/YOUR_USERNAME/.claude/hooks/ghostty-notify.sh"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/ghostty-notify.sh\""
           }
         ]
       }
@@ -23,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/YOUR_USERNAME/.claude/hooks/ghostty-tab-save.sh"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/ghostty-tab-save.sh\""
           }
         ]
       }
@@ -34,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/Users/YOUR_USERNAME/.claude/hooks/ghostty-notify.sh"
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/ghostty-notify.sh\""
           }
         ]
       }

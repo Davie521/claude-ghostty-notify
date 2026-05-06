@@ -1,0 +1,14 @@
+{
+  "name": "claude-ghostty-notify",
+  "owner": {
+    "name": "Davie521",
+    "url": "https://github.com/Davie521"
+  },
+  "plugins": [
+    {
+      "name": "claude-ghostty-notify",
+      "source": "./",
+      "description": "Ghostty-native notifications for Claude Code with click-to-jump tab focus and time-tiered alerts"
+    }
+  ]
+}
