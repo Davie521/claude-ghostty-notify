@@ -1,15 +1,20 @@
 #!/bin/bash
 # Ghostty-native notification for Claude Code.
-# Replaces code-notify for Notification/Stop hooks.
+# Wired up to the Stop hook only — Notification (idle/permission) events are
+# intentionally not handled here; under bypass-permissions mode they're rare,
+# and the terminal bell already fires when they do.
 #
 # Features:
 #   - Only notify when the round has been running ≥ MIN_ELAPSED seconds
 #   - Click notification → ghostty-tab-focus.sh jumps to the right tab
-#   - System sound (Glass for Stop, Ping for input required)
+#   - System Glass sound for tasks past SOUND_ELAPSED
 #   - Simple rate limit to prevent duplicate pings from sub-agents
+#
+# Backend dependency checks (terminal-notifier / alerter) live inside each
+# fire_with_* function so a forced backend isn't silently blocked by a missing
+# fallback dependency.
 
 [[ "${TERM_PROGRAM:-}" != "ghostty" ]] && [[ -z "${GHOSTTY_RESOURCES_DIR:-}" ]] && exit 0
-command -v terminal-notifier >/dev/null 2>&1 || exit 0
 command -v jq >/dev/null 2>&1 || exit 0
 
 HOOK_DATA=""
@@ -47,23 +52,18 @@ clear_start_on_stop() {
     esac
 }
 
-# Notification events (idle_prompt / permission_prompt) bypass the elapsed
-# gates entirely: under bypass-permissions mode they are rare but always
-# blocking, so we want to alert immediately with sound regardless of duration.
-SILENT=false
+# Stop event only — apply two-tier elapsed gating. Notification events are
+# not registered to this script (see hooks.json / README).
 case "$HOOK_EVENT" in
-    Notification|notification)
-        :  # always notify with sound
-        ;;
-    *)
-        # Stop events: apply the two-tier elapsed gating.
-        if [[ "$START" -le 0 ]] || (( ELAPSED < MIN_ELAPSED )); then
-            clear_start_on_stop
-            exit 0
-        fi
-        (( ELAPSED < SOUND_ELAPSED )) && SILENT=true
-        ;;
+    Stop|stop) ;;
+    *) clear_start_on_stop; exit 0 ;;
 esac
+if [[ "$START" -le 0 ]] || (( ELAPSED < MIN_ELAPSED )); then
+    clear_start_on_stop
+    exit 0
+fi
+SILENT=false
+(( ELAPSED < SOUND_ELAPSED )) && SILENT=true
 
 # ── Rate limit (avoid spam from parallel sub-agents) ──────────────────────
 RATE_DIR="$HOME/.claude/notifications/state"
@@ -78,31 +78,11 @@ if [[ -f "$RATE_FILE" ]]; then
 fi
 date +%s > "$RATE_FILE"
 
-# ── Build title/subtitle/sound per event ───────────────────────────────────
-case "$HOOK_EVENT" in
-    Stop|stop)
-        TITLE="Claude ✅"
-        SUBTITLE="Task Complete — $PROJECT_NAME"
-        MESSAGE=$(printf 'Finished after %dm %ds' $((ELAPSED / 60)) $((ELAPSED % 60)))
-        SOUND="Glass"
-        ;;
-    Notification|notification)
-        if printf '%s' "$HOOK_DATA" | grep -q 'permission_prompt\|request_permissions' 2>/dev/null; then
-            TITLE="Claude 🔐"
-            SUBTITLE="Permission Required — $PROJECT_NAME"
-            MESSAGE=$(printf '%s' "$HOOK_DATA" | jq -r '.message // "Claude needs permission"' 2>/dev/null)
-        else
-            TITLE="Claude 🔔"
-            SUBTITLE="Input Required — $PROJECT_NAME"
-            MESSAGE=$(printf '%s' "$HOOK_DATA" | jq -r '.message // "Claude is waiting for you"' 2>/dev/null)
-        fi
-        SOUND="Ping"
-        ;;
-    *)
-        clear_start_on_stop
-        exit 0
-        ;;
-esac
+# ── Build title/subtitle/sound (Stop only) ─────────────────────────────────
+TITLE="Claude ✅"
+SUBTITLE="Task Complete — $PROJECT_NAME"
+MESSAGE=$(printf 'Finished after %dm %ds' $((ELAPSED / 60)) $((ELAPSED % 60)))
+SOUND="Glass"
 
 # ── Fire notification with click-to-focus ──────────────────────────────────
 # Use `alerter` (already installed at ~/.local/bin/alerter) instead of
@@ -118,6 +98,7 @@ ALERTER="$HOME/.local/bin/alerter"
 GROUP_ID="ghostty-notify-${SESSION_ID}"
 
 fire_with_alerter() {
+    [[ -x "$ALERTER" ]] || return 0
     # alerter returns click events ONLY via --actions (clicking the body just
     # activates the sender). So we give an explicit "Go to tab" button.
     # Omit --sound when SILENT=true (short-but-not-trivial tasks).
@@ -150,14 +131,17 @@ fire_with_alerter() {
 }
 
 fire_with_terminal_notifier() {
-    # Fallback if alerter is missing. Notification is fire-and-forget: we
-    # intentionally drop click-to-focus wiring on this path because
-    # terminal-notifier's -execute runs on ANY click (no way to
-    # differentiate dismiss from action — the same bug the alerter
-    # whitelist fixes). Better to degrade gracefully: user sees the
-    # notification and navigates to the tab manually.
-    # Also avoids a shell-injection surface from interpolating
-    # SESSION_ID into -execute's command string.
+    command -v terminal-notifier >/dev/null 2>&1 || return 0
+    # Click-to-jump: terminal-notifier's -execute fires on ANY click (including
+    # dismiss). That's a tradeoff — dismissing a notification will also raise
+    # the target Ghostty window. Acceptable cost for users on the
+    # terminal-notifier backend (typically because their Script Editor bundle
+    # isn't authorized for notifications, so alerter's UI silently fails).
+    #
+    # SESSION_ID is interpolated into a shell command string. To prevent shell
+    # injection from a malicious hook payload, only wire up -execute when
+    # SESSION_ID matches the UUID-like shape Claude Code emits. Anything else
+    # falls back to plain notification with no click action.
     local args=(
         -title "$TITLE"
         -subtitle "$SUBTITLE"
@@ -165,14 +149,36 @@ fire_with_terminal_notifier() {
         -group "$GROUP_ID"
     )
     [[ "$SILENT" != "true" ]] && args+=(-sound "$SOUND")
+    if [[ -x "$FOCUS_SCRIPT" ]] && [[ "$SESSION_ID" =~ ^[a-fA-F0-9-]+$ ]]; then
+        args+=(-execute "$FOCUS_SCRIPT $SESSION_ID")
+    fi
     terminal-notifier "${args[@]}" >/dev/null 2>&1
 }
 
-if [[ -x "$ALERTER" ]]; then
-    fire_with_alerter
-else
-    fire_with_terminal_notifier
-fi
+# Backend selection. Default: prefer alerter (supports click-to-jump), fall
+# back to terminal-notifier. Override with GHOSTTY_NOTIFY_BACKEND:
+#   - "terminal-notifier" : force terminal-notifier (use this when Script
+#                           Editor's bundle isn't authorized for notifications
+#                           in System Settings, since alerter borrows that
+#                           bundle and silently fails to display)
+#   - "alerter"           : force alerter (errors if missing)
+#   - unset / "auto"      : prefer alerter, fall back to terminal-notifier
+BACKEND="${GHOSTTY_NOTIFY_BACKEND:-auto}"
+case "$BACKEND" in
+    terminal-notifier)
+        fire_with_terminal_notifier
+        ;;
+    alerter)
+        fire_with_alerter
+        ;;
+    *)
+        if [[ -x "$ALERTER" ]]; then
+            fire_with_alerter
+        else
+            fire_with_terminal_notifier
+        fi
+        ;;
+esac
 
 clear_start_on_stop
 exit 0

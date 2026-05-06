@@ -19,13 +19,17 @@ command -v jq >/dev/null 2>&1 || exit 0
 TAB_ID=$(jq -r '.tab_id // empty' "$SAVE_FILE" 2>/dev/null)
 [[ -z "$TAB_ID" ]] && exit 0
 
-# Find the tab across all windows and select it
+# Find the tab across all windows, raise its parent window, then select it.
+# `activate window` is required for multi-window setups: without it, the tab
+# gets selected silently inside a background window and the user sees nothing
+# change. `select tab` alone does NOT raise the parent window.
 osascript <<APPLESCRIPT 2>/dev/null
 set targetId to "$TAB_ID"
 tell application "Ghostty"
     repeat with w in every window
         repeat with t in every tab of w
             if (id of t as text) is targetId then
+                activate window w
                 select tab t
                 return
             end if
