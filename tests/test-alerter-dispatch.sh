@@ -30,28 +30,35 @@ mkdir -p \
     "$SANDBOX/bin"
 
 # Stub alerter: echo whatever TEST_ACTION env var holds.
-# Hook invokes "$HOME/.local/bin/alerter" explicitly (see ALERTER= in hook).
+# Pinned via GHOSTTY_NOTIFY_ALERTER so the hook's PATH/common-location
+# discovery can't pick up a real alerter on the developer machine.
 cat > "$HOME/.local/bin/alerter" <<'SH'
 #!/bin/bash
 printf '%s\n' "${TEST_ACTION:-}"
 SH
 chmod +x "$HOME/.local/bin/alerter"
+export GHOSTTY_NOTIFY_ALERTER="$HOME/.local/bin/alerter"
 
 # Satisfy `command -v terminal-notifier` check in hook (line 12).
 ln -sf "$HOME/.local/bin/alerter" "$SANDBOX/bin/terminal-notifier"
 
-# Stub FOCUS_SCRIPT: writes marker file when invoked.
+# Stub FOCUS_SCRIPT: writes marker file when invoked. Pinned via env so the
+# hook's sibling-script resolution doesn't find the real repo focus script.
 FOCUS_MARKER="$SANDBOX/focus-fired"
 cat > "$HOME/.claude/hooks/ghostty-tab-focus.sh" <<SH
 #!/bin/bash
 printf 'session=%s\n' "\$1" > "$FOCUS_MARKER"
 SH
 chmod +x "$HOME/.claude/hooks/ghostty-tab-focus.sh"
+export GHOSTTY_NOTIFY_FOCUS_SCRIPT="$HOME/.claude/hooks/ghostty-tab-focus.sh"
 
 export TERM_PROGRAM=ghostty
 export GHOSTTY_NOTIFY_MIN_ELAPSED=10
 export GHOSTTY_NOTIFY_SOUND_ELAPSED=9999   # force SILENT=true branch too
 export GHOSTTY_NOTIFY_TIMEOUT=1
+export GHOSTTY_NOTIFY_BACKEND=auto         # pin: a host env override (e.g.
+                                           # =terminal-notifier) would route
+                                           # around the alerter path under test
 unset GHOSTTY_RESOURCES_DIR || true
 
 pass=0; fail=0

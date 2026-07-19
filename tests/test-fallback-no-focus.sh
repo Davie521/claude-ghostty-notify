@@ -29,7 +29,10 @@ mkdir -p \
     "$HOME/.local/bin" \
     "$SANDBOX/bin"
 
-# Deliberately do NOT create $HOME/.local/bin/alerter so the hook falls back.
+# Deliberately point the hook at a nonexistent alerter so it falls back.
+# (The env override keeps the test hermetic — without it, a real alerter on
+# the developer machine's PATH would be picked up by the hook's discovery.)
+export GHOSTTY_NOTIFY_ALERTER="$SANDBOX/no-such-alerter"
 
 # Fake terminal-notifier: records all args the hook passes.
 TN_LOG="$SANDBOX/tn-args.log"
@@ -46,13 +49,19 @@ cat > "$HOME/.claude/hooks/ghostty-tab-focus.sh" <<SH
 echo fired > "$FOCUS_MARKER"
 SH
 chmod +x "$HOME/.claude/hooks/ghostty-tab-focus.sh"
+export GHOSTTY_NOTIFY_FOCUS_SCRIPT="$HOME/.claude/hooks/ghostty-tab-focus.sh"
 
 export TERM_PROGRAM=ghostty
 export GHOSTTY_NOTIFY_MIN_ELAPSED=10
 export GHOSTTY_NOTIFY_TIMEOUT=1
+export GHOSTTY_NOTIFY_BACKEND=auto   # pin against host env overrides
 unset GHOSTTY_RESOURCES_DIR || true
 
-sid="fallback-$(date +%s)-$RANDOM"
+# The sid MUST be UUID-shaped (hex + dashes, matching ^[a-fA-F0-9-]+$).
+# A previous regression re-added -execute behind exactly that session-id
+# guard, and a non-hex sid like "fallback-..." sailed past it — making
+# every check below pass vacuously while real sessions got -execute wired.
+sid="deadbeef-$(date +%s)-$RANDOM"
 echo $(( $(date +%s) - 60 )) > "$HOME/.claude/notifications/ghostty-sessions/${sid}.start"
 
 printf '{"session_id":"%s","cwd":"/tmp","hook_event_name":"Stop"}' "$sid" | \

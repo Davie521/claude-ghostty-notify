@@ -18,7 +18,7 @@ Three tiers of notifications, so short tasks don't spam you:
 | `3 – 10 min` | **Notification, no sound** — glance at Notification Center if you wandered off |
 | `≥ 10 min` | **Notification with Glass sound** — you've clearly walked away, we'll wake you |
 
-Only fires on task completion (`Stop`). Input / permission prompts (`Notification` events) are intentionally ignored — under bypass-permissions mode they're rare, and when they do fire, the terminal bell already covers them.
+Fires on task completion (`Stop`). Input / permission prompts (`Notification` events) are ignored by default — under bypass-permissions mode they're rare, and when they do fire, the terminal bell already covers them. If you run the default permission mode, set `GHOSTTY_NOTIFY_ON_PROMPT=1` to get an immediate Ping alert whenever Claude blocks on a prompt in a background tab (otherwise a stalled task looks exactly like a running one).
 
 The thresholds are all configurable via env vars.
 
@@ -62,9 +62,9 @@ That's it — hooks are auto-registered via the plugin manifest. **No manual `se
 
 ### 3. Flip one macOS setting
 
-**System Settings → Notifications → Script Editor → Alert Style → Persistent**
+**System Settings → Notifications → Alert Style → Persistent**, for **both** the **Script Editor** and **Terminal** entries (whichever ones exist on your machine).
 
-> Why Script Editor? `alerter` delivers notifications under the Script Editor bundle by default. **Persistent** style keeps the notification on screen until you dismiss it, and shows the **Go to tab** button directly. Banner style auto-hides and tucks the button behind a "Show" chevron — clicks won't reliably trigger.
+> Which bundle delivers the notification depends on your alerter version: legacy alerter (≤1.x, the ObjC builds) borrows the Script Editor bundle, while alerter 26.x (the Swift rewrite) defaults to `com.apple.Terminal` — its `--help` documents `--sender ... (default: com.apple.Terminal)`. Setting both is harmless and covers either version. **Persistent** style keeps the notification on screen until you dismiss it, and shows the **Go to tab** button directly. Banner style auto-hides and tucks the button behind a "Show" chevron — clicks won't reliably trigger.
 
 ### 4. Restart Claude Code
 
@@ -95,7 +95,10 @@ All three thresholds are controlled by environment variables in your `settings.j
 | `GHOSTTY_NOTIFY_MIN_ELAPSED`   | `180`  | Below this elapsed time (3 min): **silent** — no notification at all |
 | `GHOSTTY_NOTIFY_SOUND_ELAPSED` | `600`  | Below this (10 min) but above MIN: notification **without** sound |
 | `GHOSTTY_NOTIFY_TIMEOUT`       | `1200` | How long the notification stays on screen before auto-dismissing (20 min) |
-| `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto` (alerter then terminal-notifier), `alerter` (force), or `terminal-notifier` (force). Set to `terminal-notifier` if alerter notifications never appear — see Troubleshooting. |
+| `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto` (alerter then terminal-notifier) or `terminal-notifier` (force). Set to `terminal-notifier` if alerter notifications never appear — see Troubleshooting. Note the terminal-notifier backend never wires click-to-jump (its `-execute` fires on dismiss too), and a forced-but-missing alerter degrades to terminal-notifier instead of silently dropping the notification. |
+| `GHOSTTY_NOTIFY_ON_PROMPT`     | `0`    | Set to `1` to also alert (immediately, with Ping sound) on `Notification` events — permission / input prompts. Recommended if you do NOT run bypass-permissions mode. |
+
+Values must be plain integers (seconds); anything else falls back to the default.
 
 Example: notify on tasks > 30 seconds, sound on > 5 minutes, persist 20 minutes:
 
@@ -111,7 +114,7 @@ Example: notify on tasks > 30 seconds, sound on > 5 minutes, persist 20 minutes:
 
 ### I don't see any notifications
 
-1. Did you change Script Editor to **Persistent** alert style? (Step 3.)
+1. Did you change Script Editor **and Terminal** to **Persistent** alert style? (Step 3 — which bundle delivers depends on your alerter version.)
 2. Did you restart Claude Code after adding the env vars? (Step 4.)
 3. Is macOS **Do Not Disturb / Focus** mode on? Turn it off and test again.
 4. Check the hooks ran: `ls ~/.claude/notifications/ghostty-sessions/` — you should see a `<session_id>.json` and `.start` file for the current session.
@@ -170,8 +173,12 @@ Only runs the expensive marker dance once per session (the save file is kept aro
 1. Reads the start timestamp from `PreToolUse`.
 2. Computes elapsed seconds; exits silently if below `MIN_ELAPSED`.
 3. Fires `alerter` in a backgrounded subshell with an explicit `Go to tab` action button. Omits `--sound` if elapsed is below `SOUND_ELAPSED`.
-4. The subshell captures `alerter`'s stdout: `@CLOSED` / `@TIMEOUT` → do nothing; anything else → invoke the focus script.
+4. The subshell captures `alerter`'s stdout and fires the focus script only for the `Go to tab` button or a body click (`@CONTENTCLICKED`) — dismiss/timeout do nothing.
 5. Clears the start file on Stop so the next round re-arms.
+
+**Hook 2b — `ghostty-round-reset.sh` (runs on `UserPromptSubmit`):**
+
+Clears the round-start timestamp. The Stop hook can't do this when a round ends via interrupt (Esc/Ctrl-C) or a crash — without this reset, the stale timestamp would inflate the next round's elapsed time and fire a loud false "Finished after 20m" notification for a 10-second task.
 
 **Hook 3 — `ghostty-tab-focus.sh` (runs when user clicks Go to tab):**
 
@@ -200,8 +207,10 @@ That's it — hooks are automatically deregistered.
 ```bash
 rm -f ~/.claude/hooks/ghostty-tab-save.sh \
       ~/.claude/hooks/ghostty-tab-focus.sh \
-      ~/.claude/hooks/ghostty-notify.sh
+      ~/.claude/hooks/ghostty-notify.sh \
+      ~/.claude/hooks/ghostty-round-reset.sh
 rm -rf ~/.claude/notifications/ghostty-sessions
+rm -f ~/.claude/notifications/state/ghostty-notify-*
 ```
 
 Then remove the `env` and `hooks` entries from `~/.claude/settings.json`.
@@ -212,6 +221,7 @@ Then remove the `env` and `hooks` entries from `~/.claude/settings.json`.
 - **Ghostty only.** The tab-identification trick is Ghostty-specific.
 - **Session must have started in Ghostty.** If Claude's controlling TTY isn't a Ghostty surface, the hooks exit silently.
 - **Tab closed after save.** If you close the tab hosting Claude, clicking the notification falls back to just activating Ghostty.
+- **Ghostty must be scriptable.** Tab identification needs Ghostty ≥ 1.3 (AppleScript support) and the macOS Automation permission. If either is missing, the hooks detect it once, back off for a day, and notifications degrade to activate-only. Same for `claude` running inside tmux (OSC 2 retitles the tmux pane, not the Ghostty tab): after 3 failed attempts the session degrades to activate-only.
 
 ## Credits
 

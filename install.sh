@@ -16,8 +16,10 @@ if ! command -v jq >/dev/null 2>&1; then
     exit 1
 fi
 
-ALERTER="$HOME/.local/bin/alerter"
-if [[ ! -x "$ALERTER" ]] && ! command -v alerter >/dev/null 2>&1; then
+if ! command -v alerter >/dev/null 2>&1 \
+    && [[ ! -x /opt/homebrew/bin/alerter ]] \
+    && [[ ! -x /usr/local/bin/alerter ]] \
+    && [[ ! -x "$HOME/.local/bin/alerter" ]]; then
     echo "⚠️  Missing recommended dependency: alerter"
     echo "   Install:  brew install alerter"
     echo "   (hooks will still install, but notifications fall back to terminal-notifier)"
@@ -33,7 +35,7 @@ HOOKS_DIR="$HOME/.claude/hooks"
 mkdir -p "$HOOKS_DIR"
 
 install_from_local() {
-    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh; do
+    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh ghostty-round-reset.sh; do
         cp "$LOCAL_HOOKS/$f" "$HOOKS_DIR/$f"
         chmod +x "$HOOKS_DIR/$f"
         echo "  ✓ installed $f (local)"
@@ -42,7 +44,7 @@ install_from_local() {
 
 install_from_github() {
     local RAW="https://raw.githubusercontent.com/Davie521/claude-ghostty-notify/main/hooks"
-    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh; do
+    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh ghostty-round-reset.sh; do
         curl -fsSL "$RAW/$f" -o "$HOOKS_DIR/$f"
         chmod +x "$HOOKS_DIR/$f"
         echo "  ✓ installed $f (remote)"
@@ -65,14 +67,21 @@ echo "1. Merge the snippet into ~/.claude/settings.json:"
 echo
 cat <<'EOF'
     "env": {
-      "GHOSTTY_NOTIFY_MIN_ELAPSED": "45",
-      "GHOSTTY_NOTIFY_SOUND_ELAPSED": "120",
-      "GHOSTTY_NOTIFY_TIMEOUT": "600"
+      "GHOSTTY_NOTIFY_MIN_ELAPSED": "180",
+      "GHOSTTY_NOTIFY_SOUND_ELAPSED": "600",
+      "GHOSTTY_NOTIFY_TIMEOUT": "1200"
     },
     "hooks": {
       "PreToolUse": [{
         "matcher": "",
         "hooks": [{"type": "command", "command": "/Users/$USER/.claude/hooks/ghostty-tab-save.sh"}]
+      }],
+      "UserPromptSubmit": [{
+        "hooks": [{"type": "command", "command": "/Users/$USER/.claude/hooks/ghostty-round-reset.sh"}]
+      }],
+      "Notification": [{
+        "matcher": "",
+        "hooks": [{"type": "command", "command": "/Users/$USER/.claude/hooks/ghostty-notify.sh"}]
       }],
       "Stop": [{
         "matcher": "",
@@ -83,7 +92,9 @@ EOF
 echo
 echo "   (Replace \$USER with your username — hooks require absolute paths.)"
 echo
-echo "2. System Settings → Notifications → Script Editor → Alert Style → Persistent"
+echo "2. System Settings → Notifications → Alert Style → Persistent, for BOTH"
+echo "   'Script Editor' (legacy alerter ≤1.x) and 'Terminal' (alerter 26.x,"
+echo "   whose default sender bundle is com.apple.Terminal)."
 echo
 echo "3. Restart Claude Code so the env vars take effect."
 echo "─────────────────────────────────────────────────────────"
