@@ -11,11 +11,11 @@ A long run finishes, macOS shows a notification, you click **Go to tab**, and Gh
 ```
 10:32   you start a 12-min refactor in tab 3 of 8, then switch to your browser
           ...
-10:44   ┌────────────────────────────────┐
-        │ Claude ✅  Task Complete        │   ← macOS notification
-        │ Finished after 12m 3s          │
-        │                  [ Go to tab ]  │
-        └────────────────────────────────┘
+10:44   ┌──────────────────────────┐
+        │ Claude ✅  Task Complete │   ← macOS notification
+        │ Finished after 12m 3s    │
+        │            [ Go to tab ] │
+        └──────────────────────────┘
         click  →  Ghostty jumps straight to tab 3
 ```
 
@@ -164,25 +164,25 @@ Normal. `alerter` blocks until you click an action or it times out (`GHOSTTY_NOT
 ## How it works
 
 ```
-┌─────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────┐
 │ PreToolUse → ghostty-tab-save.sh          (once per session) │
 │   OSC 2 marker in the tab title → AppleScript finds the tab  │
 │   → saves {tab_id} to a per-session file                     │
-└─────────────────────────────────────────────────────────────┘
-┌─────────────────────────────────────────────────────────────┐
+└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
 │ UserPromptSubmit → ghostty-round-reset.sh                    │
 │   re-arms the round timer (survives Esc / crash)             │
-└─────────────────────────────────────────────────────────────┘
-┌─────────────────────────────────────────────────────────────┐
+└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
 │ Stop → ghostty-notify.sh                                     │
 │   elapsed ≥ MIN? → fire alerter with a "Go to tab" button    │
-└─────────────────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────────────────┘
                           │  click "Go to tab"
                           ▼
-┌─────────────────────────────────────────────────────────────┐
+┌──────────────────────────────────────────────────────────────┐
 │ ghostty-tab-focus.sh                                         │
-│   read {tab_id} → AppleScript `select tab` → jump to THE tab │
-└─────────────────────────────────────────────────────────────┘
+│   read {tab_id} → AppleScript select tab → jump to THE tab   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 **`ghostty-tab-save.sh` (every `PreToolUse`):** reads `session_id` / `cwd` from stdin; records a start timestamp; walks the process tree to find Claude's controlling TTY; verifies Ghostty is scriptable, then writes an OSC 2 escape with a session-unique marker into the tab title; asks Ghostty via AppleScript which tab now carries the marker; restores the original title (via `trap EXIT`); saves `{tab_id, cwd}`. The marker dance runs once per session, serialized under a lock so parallel tool calls can't race. If Ghostty can't be scripted or the marker can't round-trip (e.g. inside tmux), it backs off and the session degrades to activate-only.
