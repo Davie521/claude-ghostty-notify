@@ -1,5 +1,7 @@
 # claude-ghostty-notify
 
+[![CI](https://github.com/Davie521/claude-ghostty-notify/actions/workflows/ci.yml/badge.svg)](https://github.com/Davie521/claude-ghostty-notify/actions/workflows/ci.yml)
+
 > 为 macOS 上跑在 [Ghostty](https://ghostty.org) 里的 [Claude Code](https://github.com/anthropics/claude-code) 提供 **精准到 tab** 的点击跳转通知。
 
 **[English version here](./README.md)**
@@ -18,7 +20,7 @@
 | `3 – 10 分钟` | **弹通知，无声** — 走神回来扫一眼通知中心就行 |
 | `≥ 10 分钟` | **弹通知 + Glass 提示音** — 你肯定走远了，得叫你 |
 
-只在任务完成（`Stop`）时弹。输入 / 权限请求（`Notification` 事件）**故意不处理** —— bypass-permissions 模式下它们很少出现，真触发了终端铃声也会响，已经够提示了。
+任务完成（`Stop`）时弹。输入 / 权限请求（`Notification` 事件）**默认不处理** —— bypass-permissions 模式下它们很少出现，真触发了终端铃声也会响。如果你跑的是默认权限模式，设 `GHOSTTY_NOTIFY_ON_PROMPT=1` 可以在 Claude 卡在后台 tab 的权限/输入提示上时立刻收到 Ping 提醒（否则卡住的任务和还在跑的任务看起来一模一样）。
 
 阈值都可自定义（env 变量）。
 
@@ -62,9 +64,9 @@ brew install jq alerter
 
 ### 3. 改一个 macOS 系统设置
 
-**系统设置 → 通知 → Script Editor → 提醒样式 → 提醒 (Persistent)**
+**系统设置 → 通知 → 提醒样式 → 提醒 (Persistent)**，**Script Editor 和 Terminal 两个条目都设**（机器上有哪个设哪个）。
 
-> 为什么是 Script Editor？`alerter` 默认挂在 Script Editor 这个 bundle 下发通知。**提醒 (Persistent)** 样式会让通知留在屏幕上、直接显示 **Go to tab** 按钮。**横幅 (Banner)** 样式通知一闪即逝，按钮会藏在 "Show" 折叠菜单里，点击不稳定。
+> 通知挂在哪个 bundle 下取决于 alerter 版本：老版 alerter（≤1.x，ObjC 构建）借用 Script Editor 的 bundle，而 alerter 26.x（Swift 重写版）默认是 `com.apple.Terminal`（它的 `--help` 写着 `--sender ... (default: com.apple.Terminal)`）。两个都设没有副作用，能覆盖任一版本。**提醒 (Persistent)** 样式会让通知留在屏幕上、直接显示 **Go to tab** 按钮。**横幅 (Banner)** 样式通知一闪即逝，按钮会藏在 "Show" 折叠菜单里，点击不稳定。
 
 ### 4. 重启 Claude Code
 
@@ -95,7 +97,10 @@ cd claude-ghostty-notify
 | `GHOSTTY_NOTIFY_MIN_ELAPSED`   | `180`  | 低于这个秒数（3 分钟）：**静默** —— 完全不弹通知 |
 | `GHOSTTY_NOTIFY_SOUND_ELAPSED` | `600`  | 低于这个（10 分钟）但高于 MIN：**弹通知但无声** |
 | `GHOSTTY_NOTIFY_TIMEOUT`       | `1200` | 通知在屏幕上保留多久（20 分钟），到时自动消失 |
-| `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto`（先 alerter，没有再 fallback 到 terminal-notifier）/ `alerter`（强制）/ `terminal-notifier`（强制）。如果 alerter 弹不出通知，设成 `terminal-notifier` —— 见排查那节 |
+| `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto`（先 alerter，没有再 fallback 到 terminal-notifier）/ `terminal-notifier`（强制）。如果 alerter 弹不出通知，设成 `terminal-notifier` —— 见排查那节。注意 terminal-notifier 后端不接点击跳转（它的 `-execute` 连 dismiss 都会触发）；强制 alerter 但二进制缺失时会降级到 terminal-notifier，而不是静默吞掉通知 |
+| `GHOSTTY_NOTIFY_ON_PROMPT`     | `0`    | 设成 `1` 后，`Notification` 事件（权限/输入提示）也会立即弹通知 + Ping 音。不跑 bypass-permissions 模式的话推荐打开 |
+
+值必须是纯整数（秒），否则回落到默认值。
 
 **例子**：我想让超过 30 秒的任务都弹通知，但只有超过 5 分钟的才响铃，通知一直挂 20 分钟才消失：
 
@@ -111,7 +116,7 @@ cd claude-ghostty-notify
 
 ### 完全看不到通知
 
-1. Script Editor 的 **Alert Style** 改成 **Persistent** 了吗？（第 3 步）
+1. Script Editor **和 Terminal** 的 **Alert Style** 都改成 **Persistent** 了吗？（第 3 步 —— 通知挂在哪个 bundle 下取决于 alerter 版本）
 2. 改完 env 有没有**重启** Claude Code？（第 4 步）
 3. macOS 的**勿扰 / 专注模式**开了吗？关掉再试。
 4. 检查 hook 跑过没：`ls ~/.claude/notifications/ghostty-sessions/`，应该能看到当前 session 的 `<session_id>.json` 和 `.start` 文件。
@@ -170,8 +175,12 @@ cd claude-ghostty-notify
 1. 读 `PreToolUse` 写的时间戳，算出任务耗时。
 2. 低于 `MIN_ELAPSED` 直接静默退出。
 3. 以后台子 shell 启动 `alerter`，带一个显式的 `Go to tab` action 按钮。耗时低于 `SOUND_ELAPSED` 时不传 `--sound`。
-4. 子 shell 捕获 `alerter` 的 stdout：`@CLOSED` / `@TIMEOUT` → 啥也不做；其他值 → 调 focus 脚本。
+4. 子 shell 捕获 `alerter` 的 stdout：只有 `Go to tab` 按钮或通知主体点击（`@CONTENTCLICKED`）才调 focus 脚本；dismiss / 超时啥也不做。
 5. Stop 事件清除时间戳，下一轮任务重新计时。
+
+**Hook 2b —— `ghostty-round-reset.sh`（`UserPromptSubmit` 触发）：**
+
+清除本轮开始时间戳。用户中断（Esc/Ctrl-C）或进程崩溃时 Stop 不会触发，没有这个兜底的话，残留的旧时间戳会把下一轮的耗时算得离谱 —— 10 秒的小任务弹出带响铃的"Finished after 20m"假通知。
 
 **Hook 3 —— `ghostty-tab-focus.sh`（用户点 Go to tab 时跑）：**
 
@@ -200,8 +209,10 @@ cd claude-ghostty-notify
 ```bash
 rm -f ~/.claude/hooks/ghostty-tab-save.sh \
       ~/.claude/hooks/ghostty-tab-focus.sh \
-      ~/.claude/hooks/ghostty-notify.sh
+      ~/.claude/hooks/ghostty-notify.sh \
+      ~/.claude/hooks/ghostty-round-reset.sh
 rm -rf ~/.claude/notifications/ghostty-sessions
+rm -f ~/.claude/notifications/state/ghostty-notify-*
 ```
 
 然后把 `~/.claude/settings.json` 里相关的 `env` 和 `hooks` 条目删掉。
@@ -212,6 +223,7 @@ rm -rf ~/.claude/notifications/ghostty-sessions
 - **仅 Ghostty**。tab 识别技巧是 Ghostty 独有的。
 - **Session 必须在 Ghostty 里启动**。如果 Claude 的 controlling TTY 不是 Ghostty surface，hook 静默退出。
 - **关 tab 后跳不过去**。跑 Claude 的原 tab 被关掉，点通知只 activate Ghostty，无法跳转。
+- **Ghostty 必须可被 AppleScript 控制**。tab 识别需要 Ghostty ≥ 1.3（AppleScript 支持）+ macOS 自动化权限。缺任一个时 hook 会探测一次然后退避一天，通知降级为只 activate。`claude` 跑在 tmux 里同理（OSC 2 改的是 tmux pane 标题，不是 Ghostty tab）：失败 3 次后该 session 降级为只 activate。
 
 ## 致谢
 

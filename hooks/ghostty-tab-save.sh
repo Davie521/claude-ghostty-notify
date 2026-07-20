@@ -25,14 +25,41 @@ CWD=$(printf '%s' "$HOOK_DATA" | jq -r '.cwd // empty' 2>/dev/null)
 SAVE_DIR="$HOME/.claude/notifications/ghostty-sessions"
 SAVE_FILE="$SAVE_DIR/${SESSION_ID}.json"
 START_FILE="$SAVE_DIR/${SESSION_ID}.start"
+ATTEMPTS_FILE="$SAVE_DIR/${SESSION_ID}.attempts"
+AS_SENTINEL="$SAVE_DIR/applescript-unavailable"
 mkdir -p "$SAVE_DIR"
 
-# Record task start time only if not already set. Stop hook deletes this file,
-# so next PreToolUse creates a fresh timestamp at the start of each new round.
+# Record task start time only if not already set. Cleared by the Stop hook
+# and by ghostty-round-reset.sh on UserPromptSubmit (the latter covers
+# interrupted rounds, where Stop never fires and a stale timestamp would
+# corrupt the next round's elapsed time).
 [[ -f "$START_FILE" ]] || date +%s > "$START_FILE"
 
 # Skip tab-id resolution if already saved for this session.
 [[ -f "$SAVE_FILE" ]] && exit 0
+
+# Negative cache: if a previous attempt showed Ghostty isn't scriptable
+# (AppleScript support shipped in Ghostty 1.3; the macOS Automation
+# permission can be denied), skip the whole dance instead of paying
+# sleep + two osascript spawns on every tool call. Retry daily in case the
+# user upgraded Ghostty or granted the permission.
+if [[ -f "$AS_SENTINEL" ]]; then
+    SENTINEL_AGE=$(( $(date +%s) - $(stat -f %m "$AS_SENTINEL" 2>/dev/null || echo 0) ))
+    (( SENTINEL_AGE < 86400 )) && exit 0
+    rm -f "$AS_SENTINEL"
+fi
+
+# Bounded retries: in environments where the marker can never round-trip
+# (e.g. claude inside tmux, where OSC 2 retitles the tmux pane rather than
+# the Ghostty tab), give up after 3 attempts and record an empty tab_id so
+# the focus script degrades to just activating Ghostty.
+ATTEMPTS=$(cat "$ATTEMPTS_FILE" 2>/dev/null || echo 0)
+[[ "$ATTEMPTS" =~ ^[0-9]+$ ]] || ATTEMPTS=0
+
+# Prune stale per-session state. Runs here (at most a few times per
+# session) rather than on every PreToolUse. Includes *.start: a round that
+# ended via interrupt/crash never clears its own start file.
+find "$SAVE_DIR" -type f \( -name '*.json' -o -name '*.start' -o -name '*.attempts' \) -mtime +7 -delete 2>/dev/null
 
 # ── Locate Claude's controlling TTY ────────────────────────────────────────
 find_claude_tty() {
@@ -65,6 +92,26 @@ MARKER="__CLAUDE_TAB_MARKER_${SESSION_ID}__"
 TAB_ID=""
 MARKER_WRITTEN=0
 
+# ── Serialize the marker round-trip ────────────────────────────────────────
+# Claude Code batches parallel tool calls, so two PreToolUse instances can
+# both pass the SAVE_FILE check on a session's first round. Unserialized,
+# instance B can snapshot instance A's marker as the tab's "original" title
+# and restore it on exit — permanently renaming the tab to the marker
+# string. One dance at a time; losers just exit (the winner writes
+# SAVE_FILE for everyone).
+LOCK_DIR="$SAVE_DIR/${SESSION_ID}.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    # A crashed holder leaves the lock behind; break it after 120s.
+    LOCK_AGE=$(( $(date +%s) - $(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0) ))
+    (( LOCK_AGE < 120 )) && exit 0
+    rm -rf "$LOCK_DIR" 2>/dev/null
+    mkdir "$LOCK_DIR" 2>/dev/null || exit 0
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+
+# Another instance may have completed the dance while we raced for the lock.
+[[ -f "$SAVE_FILE" ]] && exit 0
+
 # ── Snapshot all tab titles BEFORE marker ──────────────────────────────────
 SNAPSHOT=$(osascript <<'APPLESCRIPT' 2>/dev/null
 tell application "Ghostty"
@@ -80,6 +127,17 @@ tell application "Ghostty"
 end tell
 APPLESCRIPT
 )
+SNAPSHOT_STATUS=$?
+
+# Verify Ghostty is actually scriptable BEFORE touching the tab title. If
+# osascript can't control Ghostty (no AppleScript support, or the user
+# denied the Automation prompt), writing the marker would leave the title
+# stuck as the marker string with no way to query or restore it — and the
+# failed round-trip would repeat on every single tool call.
+if (( SNAPSHOT_STATUS != 0 )); then
+    date +%s > "$AS_SENTINEL" 2>/dev/null
+    exit 0
+fi
 
 # Always attempt restore on exit, even on error. Re-queries Ghostty for any
 # tab still showing the marker (covers the case where our primary resolve
@@ -111,7 +169,7 @@ APPLESCRIPT
     [[ -z "$orig" ]] && orig="Claude Code"
     printf '\033]2;%s\033\\' "$orig" > "$TTY_PATH" 2>/dev/null
 }
-trap restore_marker_title EXIT
+trap 'restore_marker_title; rmdir "$LOCK_DIR" 2>/dev/null' EXIT
 
 # ── Fire OSC 2 marker ───────────────────────────────────────────────────────
 printf '\033]2;%s\033\\' "$MARKER" > "$TTY_PATH" 2>/dev/null
@@ -141,13 +199,22 @@ APPLESCRIPT
 )
 
 # Trap will restore title on exit — unconditionally, even if TAB_ID is empty.
-[[ -z "$TAB_ID" ]] && exit 0
+if [[ -z "$TAB_ID" ]]; then
+    ATTEMPTS=$((ATTEMPTS + 1))
+    printf '%s\n' "$ATTEMPTS" > "$ATTEMPTS_FILE" 2>/dev/null
+    if (( ATTEMPTS >= 3 )); then
+        printf '{"tab_id":"","cwd":%s}\n' \
+            "$(printf '%s' "$CWD" | jq -Rs .)" \
+            > "$SAVE_FILE"
+        rm -f "$ATTEMPTS_FILE"
+    fi
+    exit 0
+fi
+rm -f "$ATTEMPTS_FILE"
 
 printf '{"tab_id":%s,"cwd":%s}\n' \
     "$(printf '%s' "$TAB_ID" | jq -Rs .)" \
     "$(printf '%s' "$CWD" | jq -Rs .)" \
     > "$SAVE_FILE"
-
-find "$SAVE_DIR" -type f -name '*.json' -mtime +7 -delete 2>/dev/null
 
 exit 0
