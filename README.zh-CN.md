@@ -1,5 +1,7 @@
 # claude-ghostty-notify
 
+[![CI](https://github.com/Davie521/claude-ghostty-notify/actions/workflows/ci.yml/badge.svg)](https://github.com/Davie521/claude-ghostty-notify/actions/workflows/ci.yml)
+
 > 为 macOS 上跑在 [Ghostty](https://ghostty.org) 里的 [Claude Code](https://github.com/anthropics/claude-code) 提供 **精准到 tab** 的点击跳转通知。
 
 **[English version here](./README.md)**

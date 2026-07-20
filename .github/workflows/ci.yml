@@ -1,0 +1,48 @@
+name: CI
+
+# macOS-only plugin, so CI runs on macOS: the hooks target /bin/bash 3.2 and
+# BSD userland (stat -f, BSD date/find), which a Linux runner would not catch.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure shellcheck and jq
+        run: |
+          command -v shellcheck >/dev/null 2>&1 || brew install shellcheck
+          command -v jq >/dev/null 2>&1 || brew install jq
+          shellcheck --version | sed -n '1,2p'
+          jq --version
+
+      - name: Bash syntax check
+        run: |
+          for f in hooks/*.sh install.sh tests/*.sh; do
+            bash -n "$f" && echo "  ok  $f"
+          done
+
+      - name: ShellCheck
+        # --severity=warning skips info/style noise (e.g. SC1003 on the
+        # intentional OSC 2 String Terminator) while still failing on any
+        # warning or error.
+        run: shellcheck --severity=warning hooks/*.sh install.sh tests/*.sh
+
+      - name: Validate JSON
+        run: |
+          for j in hooks/hooks.json example-settings.json .claude-plugin/*.json; do
+            jq empty "$j" && echo "  ok  $j"
+          done
+
+      - name: Regression tests
+        run: |
+          bash tests/test-alerter-dispatch.sh
+          bash tests/test-fallback-no-focus.sh

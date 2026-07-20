@@ -70,7 +70,8 @@ run_case() {
     local label="$3"
 
     # Fresh session id per case avoids the hook's 10s rate-limit bucket.
-    local sid="test-$(date +%s)-$RANDOM"
+    local sid
+    sid="test-$(date +%s)-$RANDOM"
 
     # Simulate a round that started 60s ago (well past MIN_ELAPSED).
     echo $(( $(date +%s) - 60 )) \

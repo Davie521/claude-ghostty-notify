@@ -1,5 +1,7 @@
 # claude-ghostty-notify
 
+[![CI](https://github.com/Davie521/claude-ghostty-notify/actions/workflows/ci.yml/badge.svg)](https://github.com/Davie521/claude-ghostty-notify/actions/workflows/ci.yml)
+
 > Tab-level click-through notifications for [Claude Code](https://github.com/anthropics/claude-code) running in [Ghostty](https://ghostty.org) on macOS.
 
 **[中文版 / 中文说明点这里](./README.zh-CN.md)**
