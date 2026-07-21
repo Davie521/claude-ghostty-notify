@@ -2,83 +2,93 @@
 
 [![CI](https://github.com/Davie521/claude-ghostty-notify/actions/workflows/ci.yml/badge.svg)](https://github.com/Davie521/claude-ghostty-notify/actions/workflows/ci.yml)
 
-> Tab-level click-through notifications for [Claude Code](https://github.com/anthropics/claude-code) running in [Ghostty](https://ghostty.org) on macOS.
+**语言 / Language** → [English](README.md) · [中文](README.zh-CN.md)
 
-**[中文版 / 中文说明点这里](./README.zh-CN.md)**
+> **The moment a long Claude Code task finishes, get pulled back to the _exact_ Ghostty tab that ran it — not the app, not the frontmost tab, _that_ tab.**
+
+A long run finishes, macOS shows a notification, you click **Go to tab**, and Ghostty jumps straight to the surface that ran it — even with five other Claude sessions open in the same project folder. A handful of small bash hooks; no daemon, no Node, no telemetry, no accessibility permissions.
+
+```
+10:32   you start a 12-min refactor in tab 3 of 8, then switch to your browser
+          ...
+10:44   ┌──────────────────────────┐
+        │ Claude ✅  Task Complete │   ← macOS notification
+        │ Finished after 12m 3s    │
+        │            [ Go to tab ] │
+        └──────────────────────────┘
+        click  →  Ghostty jumps straight to tab 3
+```
+
+Repo: https://github.com/Davie521/claude-ghostty-notify
 
 ---
 
-When a long-running Claude task finishes, a macOS notification pops up. Click **Go to tab**, and Ghostty jumps straight to the exact tab that was running that Claude session — not the frontmost tab, not the app, **that specific tab**. Works across multiple concurrent Claude sessions in the same project.
+## Why this exists
 
-## What you get
+Claude Code's own "task done" signal is a terminal bell in whatever tab you happen to be looking at — useless once you've switched apps or have several sessions running. The community notifiers help, but each stops short somewhere:
 
-Three tiers of notifications, so short tasks don't spam you:
+- most only bring Ghostty to the foreground — you still hunt for the right tab yourself;
+- many fire on every two-second command, so you learn to tune them out;
+- some switch tabs by simulating keystrokes, which needs Accessibility permission and breaks on macOS updates;
+- most can't tell apart two Claude sessions open in the same folder, because they match on the working directory.
+
+`claude-ghostty-notify` is built to close exactly those four gaps. Prior art worth a look: [code-notify](https://github.com/mylee04/code-notify), [claude-code-notifier](https://github.com/kovoor/claude-code-notifier), [claude-notifications-go](https://github.com/777genius/claude-notifications-go).
+
+---
+
+## Highlights
 
 | Elapsed task time | What happens |
 |---|---|
 | `< 3 min` | **Silent** — no notification at all |
-| `3 – 10 min` | **Notification, no sound** — glance at Notification Center if you wandered off |
-| `≥ 10 min` | **Notification with Glass sound** — you've clearly walked away, we'll wake you |
+| `3 – 10 min` | **Notification, no sound** — glance over if you wandered off |
+| `≥ 10 min` | **Notification with Glass chime** — you've clearly walked away |
 
-Fires on task completion (`Stop`). Input / permission prompts (`Notification` events) are ignored by default — under bypass-permissions mode they're rare, and when they do fire, the terminal bell already covers them. If you run the default permission mode, set `GHOSTTY_NOTIFY_ON_PROMPT=1` to get an immediate Ping alert whenever Claude blocks on a prompt in a background tab (otherwise a stalled task looks exactly like a running one).
+- **Lands on the exact tab.** An OSC 2 marker plus an AppleScript lookup pins the precise surface once per session, so two sessions in the same folder never get confused.
+- **No short-task spam.** The three tiers above are all environment variables — tune them to your rhythm.
+- **Clicks that actually work.** Prefers `alerter`'s alert-style **Go to tab** button (modern macOS silently drops action clicks on banner-style notifications); falls back to `terminal-notifier`.
+- **No accessibility permission, ever.** Uses Ghostty's native AppleScript `select tab`, not simulated keystrokes.
+- **Multi-session & resume-proof.** State is keyed by `session_id`, stable across `--resume`.
+- **Hardened for real use.** Interrupt/crash re-arm, unscriptable-Ghostty and tmux degradation, a serialized marker round-trip, fail-closed config, and injection-safe AppleScript — each regression-tested and gated by CI.
+- **Yours to keep.** A handful of small bash hooks — no daemon, no Node, no telemetry — immune to Claude Code and plugin updates.
 
-The thresholds are all configurable via env vars.
+Notifications fire on completion (`Stop`). Permission/input prompts are silent by default; set `GHOSTTY_NOTIFY_ON_PROMPT=1` to also get an immediate ping when Claude blocks on a prompt in a background tab (recommended if you don't run bypass-permissions mode).
 
-## Why this exists
+---
 
-Other Claude Code notification tools ([code-notify](https://github.com/mylee04/code-notify), [claude-code-notifier](https://github.com/kovoor/claude-code-notifier), [claude-notifications-go](https://github.com/777genius/claude-notifications-go)) either:
+## Install
 
-- don't do tab-level focus (they bring the app forward, you still have to find the right tab yourself),
-- don't suppress short-task noise (every 2-second `ls` fires a notification), or
-- break when you upgrade Claude Code / plugins.
-
-This project:
-
-- **Precise tab identification** — writes a unique marker to the terminal's title via OSC 2, queries Ghostty via AppleScript to find which tab got the marker, then restores the title. Works even if you have several Claude sessions in the same project folder.
-- **Three-tier elapsed gate** — configurable silence/silent-notify/loud-notify thresholds.
-- **No accessibility permission required** — uses Ghostty's native AppleScript `select tab` command, not keystroke simulation.
-- **Immune to Claude Code & plugin updates** — pure bash hooks you own, with `alerter` as the preferred backend (action-button-based clicks) and `terminal-notifier` as a fallback you can force via env var.
-- **Multi-session aware** — keys saved state by Claude's `session_id`, so several concurrent sessions each know their own tab.
-
-## Installation
-
-### 1. Install dependencies
+### 1. Dependencies
 
 ```bash
 brew install jq alerter
 ```
 
 - **jq** — parses the JSON Claude Code passes to hooks
-- **alerter** — shows persistent macOS notifications with action buttons (clicks aren't reliable on stock `terminal-notifier` banners)
+- **alerter** — persistent macOS notifications with action buttons (clicks aren't reliable on stock `terminal-notifier` banners)
 
-### 2. Install the plugin
+### 2. Plugin
 
-Inside Claude Code, run:
+Inside Claude Code:
 
 ```
 /plugin marketplace add Davie521/claude-ghostty-notify
 /plugin install claude-ghostty-notify
 ```
 
-That's it — hooks are auto-registered via the plugin manifest. **No manual `settings.json` edits needed.**
+Hooks are auto-registered via the plugin manifest — **no manual `settings.json` edits needed.**
 
-### 3. Flip one macOS setting
+### 3. One macOS setting
 
-**System Settings → Notifications → Alert Style → Persistent**, for **both** the **Script Editor** and **Terminal** entries (whichever ones exist on your machine).
+**System Settings → Notifications → Alert Style → Persistent**, for **both** the **Script Editor** and **Terminal** entries (whichever exist on your machine).
 
-> Which bundle delivers the notification depends on your alerter version: legacy alerter (≤1.x, the ObjC builds) borrows the Script Editor bundle, while alerter 26.x (the Swift rewrite) defaults to `com.apple.Terminal` — its `--help` documents `--sender ... (default: com.apple.Terminal)`. Setting both is harmless and covers either version. **Persistent** style keeps the notification on screen until you dismiss it, and shows the **Go to tab** button directly. Banner style auto-hides and tucks the button behind a "Show" chevron — clicks won't reliably trigger.
+> Which bundle delivers the notification depends on your alerter version: legacy alerter (≤1.x, ObjC) borrows the Script Editor bundle, while alerter 26.x (the Swift rewrite) defaults to `com.apple.Terminal` — its `--help` documents `--sender ... (default: com.apple.Terminal)`. Setting both is harmless and covers either version. **Persistent** keeps the notification on screen and shows the **Go to tab** button directly; Banner style auto-hides and tucks the button behind a "Show" chevron, where clicks won't reliably trigger.
 
 ### 4. Restart Claude Code
 
-Quit and relaunch so the new hooks are loaded.
-
-You're done. Default thresholds (3 min / 10 min / 20 min timeout) work out of the box — see [Configuration](#configuration) to tune them.
-
----
+Quit and relaunch so the new hooks load. Default thresholds (3 min / 10 min / 20 min timeout) work out of the box — see [Configuration](#configuration) to tune them.
 
 ### Manual install (without the plugin system)
-
-If you'd rather not use the plugin marketplace, the legacy installer still works:
 
 ```bash
 git clone https://github.com/Davie521/claude-ghostty-notify.git
@@ -86,23 +96,23 @@ cd claude-ghostty-notify
 ./install.sh
 ```
 
-It copies the hooks to `~/.claude/hooks/` and prints a `settings.json` snippet to merge manually. See [example-settings.json](./example-settings.json) for the exact JSON.
+It copies the hooks to `~/.claude/hooks/` and prints a `settings.json` snippet to merge. See [example-settings.json](./example-settings.json) for the exact JSON.
 
 ## Configuration
 
-All three thresholds are controlled by environment variables in your `settings.json` `env` block. Restart Claude Code for changes to take effect. Defaults are tuned for a workflow where most tasks finish under 3 minutes — only longer tasks get notifications.
+All thresholds are environment variables in your `settings.json` `env` block. Restart Claude Code for changes to take effect.
 
 | Variable | Default | What it means |
 |---|---:|---|
-| `GHOSTTY_NOTIFY_MIN_ELAPSED`   | `180`  | Below this elapsed time (3 min): **silent** — no notification at all |
+| `GHOSTTY_NOTIFY_MIN_ELAPSED`   | `180`  | Below this (3 min): **silent** — no notification at all |
 | `GHOSTTY_NOTIFY_SOUND_ELAPSED` | `600`  | Below this (10 min) but above MIN: notification **without** sound |
 | `GHOSTTY_NOTIFY_TIMEOUT`       | `1200` | How long the notification stays on screen before auto-dismissing (20 min) |
-| `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto` (alerter then terminal-notifier) or `terminal-notifier` (force). Set to `terminal-notifier` if alerter notifications never appear — see Troubleshooting. Note the terminal-notifier backend never wires click-to-jump (its `-execute` fires on dismiss too), and a forced-but-missing alerter degrades to terminal-notifier instead of silently dropping the notification. |
+| `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto` (alerter then terminal-notifier) or `terminal-notifier` (force). Set to `terminal-notifier` if alerter notifications never appear — see Troubleshooting. The terminal-notifier backend never wires click-to-jump (its `-execute` fires on dismiss too), and a forced-but-missing alerter degrades to terminal-notifier instead of silently dropping the notification. |
 | `GHOSTTY_NOTIFY_ON_PROMPT`     | `0`    | Set to `1` to also alert (immediately, with Ping sound) on `Notification` events — permission / input prompts. Recommended if you do NOT run bypass-permissions mode. |
 
 Values must be plain integers (seconds); anything else falls back to the default.
 
-Example: notify on tasks > 30 seconds, sound on > 5 minutes, persist 20 minutes:
+Example — notify on tasks over 30 seconds, sound past 5 minutes, persist 20 minutes:
 
 ```json
 "env": {
@@ -120,7 +130,7 @@ Example: notify on tasks > 30 seconds, sound on > 5 minutes, persist 20 minutes:
 2. Did you restart Claude Code after adding the env vars? (Step 4.)
 3. Is macOS **Do Not Disturb / Focus** mode on? Turn it off and test again.
 4. Check the hooks ran: `ls ~/.claude/notifications/ghostty-sessions/` — you should see a `<session_id>.json` and `.start` file for the current session.
-5. **alerter notifications never appear (even though the script ran)** — this happens when Script Editor's bundle was never authorized for notifications in System Settings. `alerter` will run, exit cleanly, and macOS silently drops the visual. Fix by forcing the terminal-notifier backend (its bundle has its own notification authorization):
+5. **alerter notifications never appear (even though the script ran)** — the delivering bundle was never authorized for notifications in System Settings. `alerter` runs, exits cleanly, and macOS silently drops the visual. Fix by forcing the terminal-notifier backend (its bundle has its own authorization):
 
    ```json
    "env": {
@@ -130,7 +140,7 @@ Example: notify on tasks > 30 seconds, sound on > 5 minutes, persist 20 minutes:
 
 ### I see two notifications (one with Script Editor icon showing my assistant message text)
 
-That's the `stop:desktop-notify` hook from [everything-claude-code](https://github.com/affaan-m/everything-claude-code) (ECC) — a popular plugin that ships its own notifier. It fights with this project. Disable just that one ECC hook (the rest of ECC keeps working):
+That's the `stop:desktop-notify` hook from [everything-claude-code](https://github.com/affaan-m/everything-claude-code) (ECC), which ships its own notifier and fights with this project. Disable just that one ECC hook (the rest of ECC keeps working):
 
 ```json
 "env": {
@@ -140,69 +150,58 @@ That's the `stop:desktop-notify` hook from [everything-claude-code](https://gith
 
 ### Click goes to Script Editor's "New Document" dialog, not Ghostty
 
-That means clicking the notification body (not the **Go to tab** button). `alerter` routes body clicks to its `--sender` app, and Script Editor's default on activation is the New Document dialog. Either:
-
-- Always click the **Go to tab** button (preferred), or
-- Enable Ghostty notification permissions and we can add `--sender com.mitchellh.ghostty` to the script — but Ghostty will then start sending its own `notify-on-command-finish-after` notifications, which may be noisy.
+You clicked the notification body, not the **Go to tab** button. `alerter` routes body clicks to its `--sender` app, and Script Editor's default on activation is the New Document dialog. Either always click **Go to tab** (preferred), or enable Ghostty notification permissions and add `--sender com.mitchellh.ghostty` to the script (Ghostty will then send its own `notify-on-command-finish-after` notifications, which may be noisy).
 
 ### It jumps to the wrong tab
 
-Two likely causes:
-
-1. You resumed the Claude session (`--resume`) in a new tab. The saved tab id from the original run is stale. Fix: `rm ~/.claude/notifications/ghostty-sessions/<session_id>.json` and run any tool call to re-capture the current tab.
+1. You resumed the session (`--resume`) in a new tab; the saved tab id is stale. Fix: `rm ~/.claude/notifications/ghostty-sessions/<session_id>.json` and run any tool call to re-capture.
 2. The tab that was running Claude was closed. Falls back to just activating Ghostty.
 
 ### The alerter process is hanging around after the notification
 
-Normal. `alerter` blocks until you click an action or the notification times out (`GHOSTTY_NOTIFY_TIMEOUT` seconds). If you want a leftover one gone: `pkill -f 'alerter.*ghostty-notify'`.
+Normal. `alerter` blocks until you click an action or it times out (`GHOSTTY_NOTIFY_TIMEOUT` seconds). To clear a leftover: `pkill -f 'alerter.*ghostty-notify'`.
 
-## How it works (technical)
+## How it works
 
-**Hook 1 — `ghostty-tab-save.sh` (runs on every `PreToolUse`):**
+```
+┌──────────────────────────────────────────────────────────────┐
+│ PreToolUse → ghostty-tab-save.sh          (once per session) │
+│   OSC 2 marker in the tab title → AppleScript finds the tab  │
+│   → saves {tab_id} to a per-session file                     │
+└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ UserPromptSubmit → ghostty-round-reset.sh                    │
+│   re-arms the round timer (survives Esc / crash)             │
+└──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ Stop → ghostty-notify.sh                                     │
+│   elapsed ≥ MIN? → fire alerter with a "Go to tab" button    │
+└──────────────────────────────────────────────────────────────┘
+                          │  click "Go to tab"
+                          ▼
+┌──────────────────────────────────────────────────────────────┐
+│ ghostty-tab-focus.sh                                         │
+│   read {tab_id} → AppleScript select tab → jump to THE tab   │
+└──────────────────────────────────────────────────────────────┘
+```
 
-1. Reads the JSON Claude Code pipes to stdin; extracts `session_id` and `cwd`.
-2. Records a start timestamp (first tool call of the round).
-3. Walks the process tree upward (`ps -o ppid= / command=`) until it finds the `claude` process — that's the one whose controlling TTY hosts the user-visible terminal.
-4. Writes an OSC 2 escape sequence to that TTY with a marker string containing the session ID. This briefly changes the tab title to the marker.
-5. Queries Ghostty via AppleScript to find which tab's title equals the marker — that's us.
-6. Restores the original title (via a `trap EXIT` so it runs even if anything above fails).
-7. Saves `{tab_id, cwd}` to `~/.claude/notifications/ghostty-sessions/<session_id>.json`.
+**`ghostty-tab-save.sh` (every `PreToolUse`):** reads `session_id` / `cwd` from stdin; records a start timestamp; walks the process tree to find Claude's controlling TTY; verifies Ghostty is scriptable, then writes an OSC 2 escape with a session-unique marker into the tab title; asks Ghostty via AppleScript which tab now carries the marker; restores the original title (via `trap EXIT`); saves `{tab_id, cwd}`. The marker dance runs once per session, serialized under a lock so parallel tool calls can't race. If Ghostty can't be scripted or the marker can't round-trip (e.g. inside tmux), it backs off and the session degrades to activate-only.
 
-Only runs the expensive marker dance once per session (the save file is kept around).
+**`ghostty-notify.sh` (on `Stop`, and on `Notification` when opted in):** computes elapsed seconds and exits silently below `MIN_ELAPSED`; otherwise fires `alerter` in a backgrounded subshell with an explicit **Go to tab** button (no sound below `SOUND_ELAPSED`). The subshell invokes the focus script only for the button or a body click (`@CONTENTCLICKED`) — dismiss and timeout do nothing. Clears the start file on Stop so the next round re-arms.
 
-**Hook 2 — `ghostty-notify.sh` (runs on `Stop`):**
+**`ghostty-round-reset.sh` (on `UserPromptSubmit`):** clears the round-start timestamp. The Stop hook can't do this when a round ends via interrupt (Esc/Ctrl-C) or a crash — without it, the stale timestamp would inflate the next round's elapsed time and fire a loud false "Finished after 20m" notification for a 10-second task.
 
-1. Reads the start timestamp from `PreToolUse`.
-2. Computes elapsed seconds; exits silently if below `MIN_ELAPSED`.
-3. Fires `alerter` in a backgrounded subshell with an explicit `Go to tab` action button. Omits `--sound` if elapsed is below `SOUND_ELAPSED`.
-4. The subshell captures `alerter`'s stdout and fires the focus script only for the `Go to tab` button or a body click (`@CONTENTCLICKED`) — dismiss/timeout do nothing.
-5. Clears the start file on Stop so the next round re-arms.
-
-**Hook 2b — `ghostty-round-reset.sh` (runs on `UserPromptSubmit`):**
-
-Clears the round-start timestamp. The Stop hook can't do this when a round ends via interrupt (Esc/Ctrl-C) or a crash — without this reset, the stale timestamp would inflate the next round's elapsed time and fire a loud false "Finished after 20m" notification for a 10-second task.
-
-**Hook 3 — `ghostty-tab-focus.sh` (runs when user clicks Go to tab):**
-
-1. Activates Ghostty (`tell application "Ghostty" to activate`).
-2. Reads `tab_id` from the session save file.
-3. Uses Ghostty's native AppleScript command `select tab` to switch to it. This is an actual command in the sdef, not a property write, so no accessibility permission is needed.
+**`ghostty-tab-focus.sh` (on click):** activates Ghostty, reads `tab_id` from the session file, and uses Ghostty's native AppleScript `select tab` command — a real verb in the sdef, not a property write, so no accessibility permission is needed.
 
 ### Design notes
 
-- **Why `session_id` and not `$PPID`?** Claude Code spawns intermediate shells with non-deterministic PIDs between hook invocations. `session_id` (from hook stdin JSON) is stable across the whole conversation including `--resume`.
-- **Why OSC 2 marker and not `cwd` matching?** Two Claude sessions in the same project folder share the same `cwd`. Marker gives us a unique per-session signal that nails the exact tab regardless.
-- **Why `alerter` and not `terminal-notifier`?** On modern macOS, Banner-style notifications silently drop `-execute` clicks. `alerter` is alert-style by design and uses explicit action buttons, which work reliably.
+- **Why `session_id` and not `$PPID`?** Claude Code spawns intermediate shells with non-deterministic PIDs between hook invocations. `session_id` (from hook stdin JSON) is stable across the whole conversation, including `--resume`.
+- **Why an OSC 2 marker and not `cwd` matching?** Two sessions in the same folder share a `cwd`. The marker is a unique per-session signal that nails the exact tab regardless.
+- **Why `alerter` and not `terminal-notifier`?** On modern macOS, Banner-style notifications silently drop `-execute` clicks. `alerter` is alert-style by design with explicit action buttons, which work reliably.
 
 ## Uninstall
 
-**Plugin install:**
-
-```
-/plugin uninstall claude-ghostty-notify
-```
-
-That's it — hooks are automatically deregistered.
+**Plugin install:** `/plugin uninstall claude-ghostty-notify` — hooks are automatically deregistered.
 
 **Manual install:**
 
@@ -219,11 +218,11 @@ Then remove the `env` and `hooks` entries from `~/.claude/settings.json`.
 
 ## Limitations
 
-- **macOS only.** Depends on Ghostty's AppleScript dictionary and macOS notification APIs.
-- **Ghostty only.** The tab-identification trick is Ghostty-specific.
-- **Session must have started in Ghostty.** If Claude's controlling TTY isn't a Ghostty surface, the hooks exit silently.
-- **Tab closed after save.** If you close the tab hosting Claude, clicking the notification falls back to just activating Ghostty.
-- **Ghostty must be scriptable.** Tab identification needs Ghostty ≥ 1.3 (AppleScript support) and the macOS Automation permission. If either is missing, the hooks detect it once, back off for a day, and notifications degrade to activate-only. Same for `claude` running inside tmux (OSC 2 retitles the tmux pane, not the Ghostty tab): after 3 failed attempts the session degrades to activate-only.
+- **macOS only** — depends on Ghostty's AppleScript dictionary and macOS notification APIs.
+- **Ghostty only** — the tab-identification trick is Ghostty-specific.
+- **Session must have started in Ghostty** — if Claude's controlling TTY isn't a Ghostty surface, the hooks exit silently.
+- **Tab closed after save** — clicking the notification falls back to just activating Ghostty.
+- **Ghostty must be scriptable** — needs Ghostty ≥ 1.3 (AppleScript support) and the macOS Automation permission. If either is missing, the hooks detect it once, back off for a day, and degrade to activate-only. Same for `claude` inside tmux (OSC 2 retitles the tmux pane, not the Ghostty tab): after 3 failed attempts the session degrades to activate-only.
 
 ## Credits
 
