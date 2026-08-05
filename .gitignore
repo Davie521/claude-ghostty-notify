@@ -9,3 +9,9 @@
 # watch loop wherever it is absent.
 watcher/.build/
 hooks/bin/
+
+# Resident agent build output. The .app bundle is assembled locally by
+# scripts/build-agent.sh; nothing signed or prebuilt is committed. Hooks fall
+# back to the shell delivery path wherever the bundle is absent.
+agent/.build/
+build/

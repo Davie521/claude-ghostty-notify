@@ -65,3 +65,16 @@ jobs:
 
       - name: Native watcher integration test
         run: bash tests/test-swift-watcher.sh
+
+      - name: NotifyCore unit tests
+        run: swift test --package-path agent
+
+      - name: Build resident agent bundle
+        run: bash scripts/build-agent.sh
+
+      # Skips itself with a loud SKIP line when the runner has no Aqua session,
+      # because the agent is an AppKit app. It never asserts that a banner
+      # appeared — that needs an authorization grant only a human can give — so
+      # the NotifyCore suites above stay the real gate.
+      - name: Resident agent integration test
+        run: bash tests/test-agent.sh

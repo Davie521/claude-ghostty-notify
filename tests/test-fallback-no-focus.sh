@@ -61,6 +61,9 @@ export GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0
 # Belt and braces next to CLEAR_ON_FOCUS=0: never hand off to a locally built
 # native watcher (tests/test-swift-watcher.sh owns that path).
 export GHOSTTY_NOTIFY_WATCHER_BIN=""
+# The terminal-notifier fallback is the whole subject here; the resident agent
+# would deliver instead and never touch the stub. Empty disables it.
+export GHOSTTY_NOTIFY_AGENT_APP=""
 unset GHOSTTY_RESOURCES_DIR || true
 
 # The sid MUST be UUID-shaped (hex + dashes, matching ^[a-fA-F0-9-]+$).

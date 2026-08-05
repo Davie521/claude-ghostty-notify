@@ -135,6 +135,9 @@ export GHOSTTY_NOTIFY_FOCUS_POLL=0.2
 # (tests/test-swift-watcher.sh covers that path). The empty value relies on
 # the hand-off using `${VAR-default}`, not `${VAR:-default}`.
 export GHOSTTY_NOTIFY_WATCHER_BIN=""
+# Same reasoning for the resident agent: it withdraws notifications from its own
+# process, so the shell clear-on-focus loop under test here would never run.
+export GHOSTTY_NOTIFY_AGENT_APP=""
 unset GHOSTTY_RESOURCES_DIR || true
 unset GHOSTTY_NOTIFY_CLEAR_ON_FOCUS || true
 unset GHOSTTY_NOTIFY_CLEAR_SCRIPT || true

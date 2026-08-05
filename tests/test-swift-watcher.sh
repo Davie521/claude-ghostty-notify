@@ -56,6 +56,10 @@ command -v jq >/dev/null 2>&1 || { echo "FATAL: jq required" >&2; exit 2; }
 # Determinize the lookup: never depend on whatever happens to sit in
 # hooks/bin. This is also what makes a bash fallback impossible.
 export GHOSTTY_NOTIFY_WATCHER_BIN="$WATCHER"
+# The watcher only ever runs on the shell delivery path, so the resident agent
+# must not intercept: it would deliver the notification itself and no watcher
+# would be spawned to test. Empty disables it.
+export GHOSTTY_NOTIFY_AGENT_APP=""
 
 SANDBOX=$(mktemp -d)
 trap 'rm -rf "$SANDBOX"' EXIT

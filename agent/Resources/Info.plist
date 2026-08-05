@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Claude Ghostty Notify</string>
+    <!-- Notification authorization and the Automation grant are both keyed to
+         this identifier. Changing it re-prompts the user for both. -->
+    <key>CFBundleIdentifier</key>
+    <string>io.github.davie521.claude-ghostty-notify</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.3.0</string>
+    <!-- Must match the SwiftPM executable product name. -->
+    <key>CFBundleExecutable</key>
+    <string>ghostty-notify-agent</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <!-- No Dock tile, no menu bar: this is a background agent that only ever
+         speaks through Notification Center. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <!-- Required before macOS will even prompt for Automation. Without this key
+         the first Apple Event to Ghostty is denied outright, and clicking a
+         notification would silently fail to jump. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Claude Ghostty Notify needs to control Ghostty so that clicking a notification can jump to the terminal tab your Claude session is running in.</string>
+</dict>
+</plist>
