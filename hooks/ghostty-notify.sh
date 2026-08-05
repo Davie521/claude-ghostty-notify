@@ -204,8 +204,8 @@ while [[ "$MESSAGE" == -* ]]; do MESSAGE="${MESSAGE#-}"; done
 
 # The focus script is our sibling: under a plugin install the hooks run from
 # the plugin directory and nothing is ever copied to ~/.claude/hooks; under a
-# manual install.sh install all three scripts sit side by side there. The
-# legacy absolute path is kept only as a last-resort fallback.
+# manual install.sh install every script sits side by side there. The legacy
+# absolute path is kept only as a last-resort fallback.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 FOCUS_SCRIPT="${GHOSTTY_NOTIFY_FOCUS_SCRIPT:-$SCRIPT_DIR/ghostty-tab-focus.sh}"
 [[ -x "$FOCUS_SCRIPT" ]] || FOCUS_SCRIPT="$HOME/.claude/hooks/ghostty-tab-focus.sh"

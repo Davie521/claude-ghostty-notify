@@ -48,7 +48,7 @@ Claude Code 自带的「任务完成」信号,是在你当前正看着的那个 
 - **落在精确的那个 tab。** 一个 OSC 2 marker + 一次 AppleScript 查询,每个 session 只做一次就锁定精确的 surface,同一目录的两个会话永不混淆。
 - **短任务不刷屏。** 上面三档全是环境变量 —— 按你自己的节奏调。
 - **点击是真能用的。** 优先用 `alerter` 的提醒样式 **Go to tab** 按钮(新版 macOS 会静默丢掉横幅样式通知上的 action 点击);缺失时降级到 `terminal-notifier`。
-- **你一回来,通知自己消失。** 聚焦到会话所在的 tab —— 不管是点通知跳回来还是自己切回来 —— 右上角的提醒立即自动清除;在会话里提交新 prompt 也会清除。角落和通知中心都不会越积越多。用 `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0` 关闭。
+- **你一回来,通知自己消失。** 聚焦到会话所在的 tab —— 不管是点通知跳回来还是自己切回来 —— 右上角的提醒立即自动清除;在会话里提交新 prompt 也会清除。角落和通知中心都不会越积越多。背后的 watcher 只活到通知消失为止(清除、点击或超时都会让它退出)。用 `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0` 关闭。
 - **永远不需要辅助功能权限。** 用 Ghostty 原生 AppleScript `select tab`,不是模拟按键。
 - **多会话、resume 无碍。** 状态按 `session_id` 做 key,`--resume` 之后依然稳定。
 - **报得出是哪个会话。** 副标题以会话标题开头 —— 优先读 hook 的 `session_title` 字段,否则取 transcript 里最后一条 `custom-title` 记录(`/rename` 手动或改名插件写入),再否则取最后一条自动生成的 `ai-title` 记录 —— 同一目录下开五个会话也能一眼分清。优先级和 `--resume` 选择器完全一致。
