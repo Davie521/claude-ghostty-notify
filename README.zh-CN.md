@@ -12,7 +12,8 @@
 10:32   你在 8 个 tab 里的第 3 个开始一次 12 分钟的重构,然后切去浏览器
           ...
 10:44   ┌──────────────────────────┐
-        │ Claude ✅  Task Complete │   ← macOS 通知
+        │ Claude ✅                │   ← macOS 通知
+        │ auth-refactor — webapp   │   ← 会话标题 — 项目名
         │ Finished after 12m 3s    │
         │            [ Go to tab ] │
         └──────────────────────────┘
@@ -47,8 +48,10 @@ Claude Code 自带的「任务完成」信号,是在你当前正看着的那个 
 - **落在精确的那个 tab。** 一个 OSC 2 marker + 一次 AppleScript 查询,每个 session 只做一次就锁定精确的 surface,同一目录的两个会话永不混淆。
 - **短任务不刷屏。** 上面三档全是环境变量 —— 按你自己的节奏调。
 - **点击是真能用的。** 优先用 `alerter` 的提醒样式 **Go to tab** 按钮(新版 macOS 会静默丢掉横幅样式通知上的 action 点击);缺失时降级到 `terminal-notifier`。
+- **你一回来,通知自己消失。** 聚焦到会话所在的 tab —— 不管是点通知跳回来还是自己切回来 —— 右上角的提醒立即自动清除;在会话里提交新 prompt 也会清除。角落和通知中心都不会越积越多。用 `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0` 关闭。
 - **永远不需要辅助功能权限。** 用 Ghostty 原生 AppleScript `select tab`,不是模拟按键。
 - **多会话、resume 无碍。** 状态按 `session_id` 做 key,`--resume` 之后依然稳定。
+- **报得出是哪个会话。** 副标题以会话标题开头 —— 优先读 hook 的 `session_title` 字段,否则取 transcript 里最后一条 `custom-title` 记录(`/rename` 手动或改名插件写入),再否则取最后一条自动生成的 `ai-title` 记录 —— 同一目录下开五个会话也能一眼分清。优先级和 `--resume` 选择器完全一致。
 - **为真实使用做了加固。** 中断/崩溃重新计时、Ghostty 不可脚本化及 tmux 降级、marker 往返串行化、配置 fail-closed、AppleScript 防注入 —— 每条都有回归测试、都受 CI 把关。
 - **完全归你掌控。** 就是几个小 bash hook —— 没有常驻进程、没有 Node、没有遥测 —— 不受 Claude Code 和插件升级影响。
 
@@ -109,8 +112,10 @@ cd claude-ghostty-notify
 | `GHOSTTY_NOTIFY_TIMEOUT`       | `1200` | 通知在屏幕上保留多久(20 分钟),到时自动消失 |
 | `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto`(先 alerter,没有再 fallback 到 terminal-notifier)/ `terminal-notifier`(强制)。alerter 弹不出通知时设成 `terminal-notifier` —— 见排查那节。terminal-notifier 后端不接点击跳转(它的 `-execute` 连 dismiss 都会触发);强制 alerter 但二进制缺失时会降级到 terminal-notifier,而不是静默吞掉通知 |
 | `GHOSTTY_NOTIFY_ON_PROMPT`     | `0`    | 设成 `1` 后,`Notification` 事件(权限/输入提示)也会立即弹通知 + Ping 音。不跑 bypass-permissions 模式的话推荐打开 |
+| `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS` | `1`   | 聚焦到会话所在 tab 时自动清除通知,在该会话提交新 prompt 时同样清除。tab 未知时(tmux、Ghostty 不可脚本化)降级为「Ghostty 重新回到前台时清除」。用 `0`/`false`/`no`/`off` 关闭;其他值一律视为开启 |
+| `GHOSTTY_NOTIFY_FOCUS_POLL`    | `1`    | 聚焦检测的轮询间隔(秒,可用小数)。`0` 会让 watcher 空转,因此回落到默认值 |
 
-值必须是纯整数(秒),否则回落到默认值。
+值必须是纯整数(秒),否则回落到默认值(`GHOSTTY_NOTIFY_FOCUS_POLL` 可用小数)。
 
 **例子** —— 超过 30 秒的任务就弹通知,但只有超过 5 分钟的才响铃,通知挂 20 分钟才消失:
 
@@ -159,7 +164,7 @@ cd claude-ghostty-notify
 
 ### alerter 进程还挂着没退
 
-正常。`alerter` 会阻塞到你点按钮或超时(`GHOSTTY_NOTIFY_TIMEOUT` 秒)。想手动清:`pkill -f 'alerter.*ghostty-notify'`。
+基本是历史问题了。`alerter` 会阻塞到你点按钮、超时(`GHOSTTY_NOTIFY_TIMEOUT` 秒),或者被聚焦清除机制回收(你聚焦到会话 tab 或提交新 prompt 时)。如果还有残留(比如设了 `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0`):`pkill -f 'alerter.*ghostty-notify'`。
 
 ## 原理
 
@@ -183,13 +188,19 @@ cd claude-ghostty-notify
 │ ghostty-tab-focus.sh                                    │
 │   读 {tab_id} → AppleScript select tab → 跳到那个 tab   │
 └─────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│ 聚焦到会话所在 tab(或提交新 prompt)                     │
+│   → ghostty-notify-clear.sh 自动清除通知                │
+└─────────────────────────────────────────────────────────┘
 ```
 
 **`ghostty-tab-save.sh`(每次 `PreToolUse`):** 从 stdin 读 `session_id` / `cwd`;记录开始时间戳;沿进程树找到 Claude 的 controlling TTY;先确认 Ghostty 可脚本化,再往 tab 标题写一个含 session ID 的独特 OSC 2 marker;通过 AppleScript 查现在哪个 tab 带着这个 marker;恢复原标题(`trap EXIT` 保底);保存 `{tab_id, cwd}`。这套 marker 舞每 session 只跑一次,并在锁的保护下串行执行,并发工具调用没法互相抢。Ghostty 没法被脚本化、或 marker 无法往返(比如在 tmux 里)时,它会退避,该 session 降级为只 activate。
 
-**`ghostty-notify.sh`(`Stop` 触发;开启后也在 `Notification` 触发):** 算出耗时,低于 `MIN_ELAPSED` 直接静默退出;否则在后台子 shell 里启动 `alerter`,带一个显式 **Go to tab** 按钮(低于 `SOUND_ELAPSED` 时无声)。子 shell 只有在点了按钮或点了通知主体(`@CONTENTCLICKED`)时才调 focus 脚本 —— dismiss / 超时啥也不做。Stop 时清时间戳,下一轮重新计时。
+**`ghostty-notify.sh`(`Stop` 触发;开启后也在 `Notification` 触发):** 算出耗时,低于 `MIN_ELAPSED` 直接静默退出;否则先解析会话标题(stdin 有 `session_title` 字段就用它,否则取 transcript 里最后一条 `custom-title` 记录,再否则取最后一条 `ai-title` 记录),再在后台子 shell 里启动 `alerter`,带一个显式 **Go to tab** 按钮(低于 `SOUND_ELAPSED` 时无声)。子 shell 只有在点了按钮或点了通知主体(`@CONTENTCLICKED`)时才调 focus 脚本 —— dismiss / 超时啥也不做。同时记下阻塞 alerter 的 PID,并派生聚焦清除 watcher(见下)。Stop 时清时间戳,下一轮重新计时。
 
-**`ghostty-round-reset.sh`(`UserPromptSubmit` 触发):** 清除本轮开始时间戳。用户中断(Esc/Ctrl-C)或崩溃时 Stop 不触发,没有它的话,残留的旧时间戳会把下一轮耗时算得离谱 —— 10 秒的小任务弹出带响铃的「Finished after 20m」假通知。
+**`ghostty-round-reset.sh`(`UserPromptSubmit` 触发):** 清除本轮开始时间戳。用户中断(Esc/Ctrl-C)或崩溃时 Stop 不触发,没有它的话,残留的旧时间戳会把下一轮耗时算得离谱 —— 10 秒的小任务弹出带响铃的「Finished after 20m」假通知。同时顺手清掉这个会话还挂在屏幕上的旧通知 —— 你都提交新 prompt 了,说明人已经回到这个 tab 了。
+
+**`ghostty-notify-clear.sh`(每条通知派生一个 watcher):** 先用免权限的 `lsappinfo` 轮询「Ghostty 是否前台」这个便宜条件,只有 Ghostty 在前台时才用 AppleScript 问 Ghostty 当前选中的是哪个 tab。一旦会话所在 tab 成为前台窗口的选中 tab,就按 group ID 移除已投递的通知(`alerter --remove` / `terminal-notifier -remove`)并杀掉阻塞的 `alerter` —— 被杀的 alerter 没有 action 输出,分发白名单本来就无视它,所以清除永远不会误触发跳转。tab 未知时(tmux、Ghostty 不可脚本化)降级为「Ghostty 回到前台」,且只认上升沿 —— 你正待在 Ghostty 别的 tab 里时弹的通知,不会在你看到之前就被清掉。alerter 自行结束(点击/超时)、被更新的 watcher 顶替、或到 `NOTIFY_TIMEOUT` 加宽限期时,watcher 自动退出。
 
 **`ghostty-tab-focus.sh`(点击时):** 激活 Ghostty,从 session 文件读 `tab_id`,用 Ghostty 原生 AppleScript `select tab` 命令切过去 —— 这是 sdef 里真实的 command(不是属性写入),所以**不需要辅助功能权限**。
 
@@ -209,7 +220,8 @@ cd claude-ghostty-notify
 rm -f ~/.claude/hooks/ghostty-tab-save.sh \
       ~/.claude/hooks/ghostty-tab-focus.sh \
       ~/.claude/hooks/ghostty-notify.sh \
-      ~/.claude/hooks/ghostty-round-reset.sh
+      ~/.claude/hooks/ghostty-round-reset.sh \
+      ~/.claude/hooks/ghostty-notify-clear.sh
 rm -rf ~/.claude/notifications/ghostty-sessions
 rm -f ~/.claude/notifications/state/ghostty-notify-*
 ```

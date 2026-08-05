@@ -12,7 +12,8 @@ A long run finishes, macOS shows a notification, you click **Go to tab**, and Gh
 10:32   you start a 12-min refactor in tab 3 of 8, then switch to your browser
           ...
 10:44   ┌──────────────────────────┐
-        │ Claude ✅  Task Complete │   ← macOS notification
+        │ Claude ✅                │   ← macOS notification
+        │ auth-refactor — webapp   │   ← session title — project
         │ Finished after 12m 3s    │
         │            [ Go to tab ] │
         └──────────────────────────┘
@@ -47,8 +48,10 @@ Claude Code's own "task done" signal is a terminal bell in whatever tab you happ
 - **Lands on the exact tab.** An OSC 2 marker plus an AppleScript lookup pins the precise surface once per session, so two sessions in the same folder never get confused.
 - **No short-task spam.** The three tiers above are all environment variables — tune them to your rhythm.
 - **Clicks that actually work.** Prefers `alerter`'s alert-style **Go to tab** button (modern macOS silently drops action clicks on banner-style notifications); falls back to `terminal-notifier`.
+- **Clears itself when you arrive.** Focus the session's tab — via the notification or on your own — and the alert dismisses itself; submitting a new prompt in the session clears it too. No stale ✅ pile-up in the corner or in Notification Center. Opt out with `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0`.
 - **No accessibility permission, ever.** Uses Ghostty's native AppleScript `select tab`, not simulated keystrokes.
 - **Multi-session & resume-proof.** State is keyed by `session_id`, stable across `--resume`.
+- **Says which session.** The subtitle leads with the session's title — the `session_title` hook field when present, else the transcript's last `custom-title` record (`/rename`, by hand or via a rename plugin), else its last auto-generated `ai-title` record — so five sessions in one folder produce distinguishable notifications. That's the same precedence the `--resume` picker uses.
 - **Hardened for real use.** Interrupt/crash re-arm, unscriptable-Ghostty and tmux degradation, a serialized marker round-trip, fail-closed config, and injection-safe AppleScript — each regression-tested and gated by CI.
 - **Yours to keep.** A handful of small bash hooks — no daemon, no Node, no telemetry — immune to Claude Code and plugin updates.
 
@@ -109,8 +112,10 @@ All thresholds are environment variables in your `settings.json` `env` block. Re
 | `GHOSTTY_NOTIFY_TIMEOUT`       | `1200` | How long the notification stays on screen before auto-dismissing (20 min) |
 | `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto` (alerter then terminal-notifier) or `terminal-notifier` (force). Set to `terminal-notifier` if alerter notifications never appear — see Troubleshooting. The terminal-notifier backend never wires click-to-jump (its `-execute` fires on dismiss too), and a forced-but-missing alerter degrades to terminal-notifier instead of silently dropping the notification. |
 | `GHOSTTY_NOTIFY_ON_PROMPT`     | `0`    | Set to `1` to also alert (immediately, with Ping sound) on `Notification` events — permission / input prompts. Recommended if you do NOT run bypass-permissions mode. |
+| `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS` | `1`   | Auto-dismiss the notification once you focus the session's Ghostty tab — and on your next prompt in that session. When the tab is unknown (tmux, unscriptable Ghostty) it degrades to "Ghostty becomes frontmost again". Turn it off with `0`, `false`, `no`, or `off`; any other value leaves it on. |
+| `GHOSTTY_NOTIFY_FOCUS_POLL`    | `1`    | Clear-on-focus poll interval in seconds (decimals allowed). `0` would spin the watcher, so it falls back to the default. |
 
-Values must be plain integers (seconds); anything else falls back to the default.
+Values must be plain integers (seconds); anything else falls back to the default (`GHOSTTY_NOTIFY_FOCUS_POLL` also accepts decimals).
 
 Example — notify on tasks over 30 seconds, sound past 5 minutes, persist 20 minutes:
 
@@ -159,7 +164,7 @@ You clicked the notification body, not the **Go to tab** button. `alerter` route
 
 ### The alerter process is hanging around after the notification
 
-Normal. `alerter` blocks until you click an action or it times out (`GHOSTTY_NOTIFY_TIMEOUT` seconds). To clear a leftover: `pkill -f 'alerter.*ghostty-notify'`.
+Mostly historical. `alerter` blocks until you click an action, it times out (`GHOSTTY_NOTIFY_TIMEOUT` seconds), or clear-on-focus reaps it when you focus the session's tab or submit a new prompt. If one still lingers (e.g. `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0`): `pkill -f 'alerter.*ghostty-notify'`.
 
 ## How it works
 
@@ -183,13 +188,19 @@ Normal. `alerter` blocks until you click an action or it times out (`GHOSTTY_NOT
 │ ghostty-tab-focus.sh                                         │
 │   read {tab_id} → AppleScript select tab → jump to THE tab   │
 └──────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────┐
+│ you focus the session's tab (or submit a new prompt)         │
+│   → ghostty-notify-clear.sh dismisses the alert              │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 **`ghostty-tab-save.sh` (every `PreToolUse`):** reads `session_id` / `cwd` from stdin; records a start timestamp; walks the process tree to find Claude's controlling TTY; verifies Ghostty is scriptable, then writes an OSC 2 escape with a session-unique marker into the tab title; asks Ghostty via AppleScript which tab now carries the marker; restores the original title (via `trap EXIT`); saves `{tab_id, cwd}`. The marker dance runs once per session, serialized under a lock so parallel tool calls can't race. If Ghostty can't be scripted or the marker can't round-trip (e.g. inside tmux), it backs off and the session degrades to activate-only.
 
-**`ghostty-notify.sh` (on `Stop`, and on `Notification` when opted in):** computes elapsed seconds and exits silently below `MIN_ELAPSED`; otherwise fires `alerter` in a backgrounded subshell with an explicit **Go to tab** button (no sound below `SOUND_ELAPSED`). The subshell invokes the focus script only for the button or a body click (`@CONTENTCLICKED`) — dismiss and timeout do nothing. Clears the start file on Stop so the next round re-arms.
+**`ghostty-notify.sh` (on `Stop`, and on `Notification` when opted in):** computes elapsed seconds and exits silently below `MIN_ELAPSED`; otherwise resolves the session title (stdin `session_title` if the field exists, else the transcript's last `custom-title` record, else its last `ai-title` record) and fires `alerter` in a backgrounded subshell with an explicit **Go to tab** button (no sound below `SOUND_ELAPSED`). The subshell invokes the focus script only for the button or a body click (`@CONTENTCLICKED`) — dismiss and timeout do nothing. It records the blocking alerter's PID and spawns the clear-on-focus watcher (below). Clears the start file on Stop so the next round re-arms.
 
-**`ghostty-round-reset.sh` (on `UserPromptSubmit`):** clears the round-start timestamp. The Stop hook can't do this when a round ends via interrupt (Esc/Ctrl-C) or a crash — without it, the stale timestamp would inflate the next round's elapsed time and fire a loud false "Finished after 20m" notification for a 10-second task.
+**`ghostty-round-reset.sh` (on `UserPromptSubmit`):** clears the round-start timestamp. The Stop hook can't do this when a round ends via interrupt (Esc/Ctrl-C) or a crash — without it, the stale timestamp would inflate the next round's elapsed time and fire a loud false "Finished after 20m" notification for a 10-second task. Also clears any still-visible notification for the session — a new prompt proves you're back at this tab.
+
+**`ghostty-notify-clear.sh` (watcher, spawned per notification):** polls a cheap `lsappinfo` frontmost gate (no TCC permission), and only while Ghostty is frontmost asks Ghostty which tab is selected. The moment the session's tab is the selected tab of the frontmost window, it removes the delivered notification by group ID (`alerter --remove` / `terminal-notifier -remove`) and kills the blocking `alerter` — a killed alerter yields no action output, which the dispatch whitelist already ignores, so clearing can never fire a phantom tab-jump. Unknown tab (tmux, unscriptable Ghostty) degrades to "Ghostty becomes frontmost", rising-edge only so an alert fired while you sat in a different Ghostty tab isn't cleared before you've seen it. The watcher exits when the alerter concludes on its own, when a newer watcher supersedes it, or at `NOTIFY_TIMEOUT` plus grace.
 
 **`ghostty-tab-focus.sh` (on click):** activates Ghostty, reads `tab_id` from the session file, and uses Ghostty's native AppleScript `select tab` command — a real verb in the sdef, not a property write, so no accessibility permission is needed.
 
@@ -209,7 +220,8 @@ Normal. `alerter` blocks until you click an action or it times out (`GHOSTTY_NOT
 rm -f ~/.claude/hooks/ghostty-tab-save.sh \
       ~/.claude/hooks/ghostty-tab-focus.sh \
       ~/.claude/hooks/ghostty-notify.sh \
-      ~/.claude/hooks/ghostty-round-reset.sh
+      ~/.claude/hooks/ghostty-round-reset.sh \
+      ~/.claude/hooks/ghostty-notify-clear.sh
 rm -rf ~/.claude/notifications/ghostty-sessions
 rm -f ~/.claude/notifications/state/ghostty-notify-*
 ```

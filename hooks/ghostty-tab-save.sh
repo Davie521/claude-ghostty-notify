@@ -58,8 +58,11 @@ ATTEMPTS=$(cat "$ATTEMPTS_FILE" 2>/dev/null || echo 0)
 
 # Prune stale per-session state. Runs here (at most a few times per
 # session) rather than on every PreToolUse. Includes *.start: a round that
-# ended via interrupt/crash never clears its own start file.
-find "$SAVE_DIR" -type f \( -name '*.json' -o -name '*.start' -o -name '*.attempts' \) -mtime +7 -delete 2>/dev/null
+# ended via interrupt/crash never clears its own start file. The notify
+# pidfiles are the same story — watchers deliberately leave theirs behind
+# rather than race a successor for the filename.
+find "$SAVE_DIR" -type f \( -name '*.json' -o -name '*.start' -o -name '*.attempts' \
+    -o -name '*.alerter-pid' -o -name '*.watch-pid' \) -mtime +7 -delete 2>/dev/null
 
 # ── Locate Claude's controlling TTY ────────────────────────────────────────
 find_claude_tty() {

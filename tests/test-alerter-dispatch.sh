@@ -59,6 +59,10 @@ export GHOSTTY_NOTIFY_TIMEOUT=1
 export GHOSTTY_NOTIFY_BACKEND=auto         # pin: a host env override (e.g.
                                            # =terminal-notifier) would route
                                            # around the alerter path under test
+# Only the click dispatch is under test; the clear-on-focus watcher is not
+# stubbed here and would poll the real lsappinfo/osascript for 30s past the
+# run. Covered by tests/test-clear-on-focus.sh instead.
+export GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0
 unset GHOSTTY_RESOURCES_DIR || true
 
 pass=0; fail=0
@@ -70,8 +74,11 @@ run_case() {
     local label="$3"
 
     # Fresh session id per case avoids the hook's 10s rate-limit bucket.
+    # Must be UUID-shaped (^[a-fA-F0-9-]+$): every hook rejects other ids
+    # before touching the filesystem, so a non-hex sid would make each case
+    # pass vacuously against a hook that exited early.
     local sid
-    sid="test-$(date +%s)-$RANDOM"
+    sid="dabbad00-$(date +%s)-$RANDOM"
 
     # Simulate a round that started 60s ago (well past MIN_ELAPSED).
     echo $(( $(date +%s) - 60 )) \

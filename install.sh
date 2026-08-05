@@ -1,6 +1,6 @@
 #!/bin/bash
 # Installer for claude-ghostty-notify.
-# Copies the three hook scripts into ~/.claude/hooks/ and prints the
+# Copies the hook scripts into ~/.claude/hooks/ and prints the
 # settings.json snippet to merge into the user's config.
 
 set -eu
@@ -35,7 +35,7 @@ HOOKS_DIR="$HOME/.claude/hooks"
 mkdir -p "$HOOKS_DIR"
 
 install_from_local() {
-    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh ghostty-round-reset.sh; do
+    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh ghostty-round-reset.sh ghostty-notify-clear.sh; do
         cp "$LOCAL_HOOKS/$f" "$HOOKS_DIR/$f"
         chmod +x "$HOOKS_DIR/$f"
         echo "  ✓ installed $f (local)"
@@ -44,7 +44,7 @@ install_from_local() {
 
 install_from_github() {
     local RAW="https://raw.githubusercontent.com/Davie521/claude-ghostty-notify/main/hooks"
-    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh ghostty-round-reset.sh; do
+    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh ghostty-round-reset.sh ghostty-notify-clear.sh; do
         curl -fsSL "$RAW/$f" -o "$HOOKS_DIR/$f"
         chmod +x "$HOOKS_DIR/$f"
         echo "  ✓ installed $f (remote)"

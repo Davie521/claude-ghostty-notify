@@ -55,6 +55,9 @@ export TERM_PROGRAM=ghostty
 export GHOSTTY_NOTIFY_MIN_ELAPSED=10
 export GHOSTTY_NOTIFY_TIMEOUT=1
 export GHOSTTY_NOTIFY_BACKEND=auto   # pin against host env overrides
+# Not under test, and its watcher would poll the real lsappinfo/osascript
+# and outlive the run (see tests/test-clear-on-focus.sh for its coverage).
+export GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0
 unset GHOSTTY_RESOURCES_DIR || true
 
 # The sid MUST be UUID-shaped (hex + dashes, matching ^[a-fA-F0-9-]+$).
