@@ -10,6 +10,11 @@
 # Features:
 #   - Only notify when the round has been running ≥ MIN_ELAPSED seconds
 #   - Click notification → ghostty-tab-focus.sh jumps to the right tab
+#   - Focus the session's tab → ghostty-notify-clear.sh auto-dismisses the
+#     notification (clear-on-focus watcher, GHOSTTY_NOTIFY_CLEAR_ON_FOCUS)
+#   - Subtitle leads with the session title (stdin session_title field, or
+#     the transcript's last custom-title / ai-title record) so parallel
+#     sessions in the same folder produce distinguishable notifications
 #   - System Glass sound for tasks past SOUND_ELAPSED
 #   - Simple rate limit to prevent duplicate pings from sub-agents
 #
@@ -29,7 +34,12 @@ fi
 SESSION_ID=$(printf '%s' "$HOOK_DATA" | jq -r '.session_id // empty' 2>/dev/null)
 CWD=$(printf '%s' "$HOOK_DATA" | jq -r '.cwd // empty' 2>/dev/null)
 HOOK_EVENT=$(printf '%s' "$HOOK_DATA" | jq -r '.hook_event_name // empty' 2>/dev/null)
+TRANSCRIPT_PATH=$(printf '%s' "$HOOK_DATA" | jq -r '.transcript_path // empty' 2>/dev/null)
 [[ -z "$SESSION_ID" ]] && exit 0
+# The id becomes part of filesystem paths below (start marker, alerter
+# pidfile) and is handed to the focus/clear scripts, so hold it to the same
+# shape the sibling hooks require before any of that.
+[[ "$SESSION_ID" =~ ^[a-fA-F0-9-]+$ ]] || exit 0
 
 SAVE_DIR="$HOME/.claude/notifications/ghostty-sessions"
 START_FILE="$SAVE_DIR/${SESSION_ID}.start"
@@ -123,21 +133,66 @@ take_rate_slot || { clear_start_on_stop; exit 0; }
 # them — prune old ones so the state dir doesn't grow forever.
 find "$RATE_DIR" -type f -name 'ghostty-notify-*' -mtime +7 -delete 2>/dev/null
 
+# ── Session title (tells apart sessions in the same folder) ────────────────
+# Preferred source: the session_title stdin field (still being trialed
+# upstream — absent from current public builds, so this is future-proofing).
+# Fallback: title records in the transcript, in the same precedence Claude
+# Code's own resume picker uses — the last custom-title (appended on every
+# /rename, by hand or via a rename plugin) outranks the last ai-title (the
+# auto-generated title Claude Code keeps refreshing for every session). A
+# brand-new session may briefly have neither; the subtitle then keeps its
+# generic event wording. Runs after the rate-limit gate so suppressed
+# events never pay the transcript scan.
+last_title_record() {
+    # $1: record type, $2: field holding the title. grep narrows the file to
+    # candidate lines cheaply; jq then keeps only real records of that type
+    # (fromjson? drops unparseable lines, select() drops look-alike text
+    # embedded in message content) and the newest one wins.
+    #
+    # gsub runs inside jq, before `tail -n 1`: a title holding an escaped
+    # newline decodes to several output lines, and tail would keep only the
+    # last fragment (a trailing newline would yield nothing at all).
+    grep -E '"type"[[:space:]]*:[[:space:]]*"'"$1"'"' "$TRANSCRIPT_PATH" 2>/dev/null \
+        | jq -Rr --arg t "$1" --arg f "$2" \
+            'fromjson? | select(.type == $t) | (.[$f] // empty) | gsub("[\\n\\r]"; " ")' 2>/dev/null \
+        | tail -n 1
+}
+SESSION_TITLE=$(printf '%s' "$HOOK_DATA" | jq -r '.session_title // empty' 2>/dev/null)
+if [[ -z "$SESSION_TITLE" && -n "$TRANSCRIPT_PATH" && -f "$TRANSCRIPT_PATH" ]]; then
+    SESSION_TITLE=$(last_title_record "custom-title" "customTitle")
+    [[ -z "$SESSION_TITLE" ]] && SESSION_TITLE=$(last_title_record "ai-title" "aiTitle")
+fi
+# The title lands in notification argv: force it one-line and control-free.
+SESSION_TITLE=$(printf '%s' "$SESSION_TITLE" | tr -d '\000-\037\177')
+
 # ── Build title/subtitle/sound per event ───────────────────────────────────
+# The session title leads the subtitle (macOS ellipsizes the tail, and the
+# title is the part that varies between sessions); the event wording it
+# displaces is already carried by the ✅/🔔 in TITLE.
 case "$HOOK_EVENT" in
     Stop|stop)
         TITLE="Claude ✅"
-        SUBTITLE="Task Complete — $PROJECT_NAME"
+        SUBTITLE="${SESSION_TITLE:-Task Complete} — $PROJECT_NAME"
         MESSAGE=$(printf 'Finished after %dm %ds' $((ELAPSED / 60)) $((ELAPSED % 60)))
         SOUND="Glass"
         ;;
     Notification|notification)
         TITLE="Claude 🔔"
-        SUBTITLE="Input Required — $PROJECT_NAME"
+        SUBTITLE="${SESSION_TITLE:-Input Required} — $PROJECT_NAME"
         MESSAGE=$(printf '%s' "$HOOK_DATA" | jq -r '.message // "Claude is waiting for you"' 2>/dev/null)
         SOUND="Ping"
         ;;
 esac
+
+# A value leading an argv slot must not start with '-'. The legacy
+# single-dash alerter and terminal-notifier both parse NSUserDefaults-style,
+# where "-wip auth fix" in value position is read as the next FLAG: the tool
+# prints usage and exits without displaying anything. SUBTITLE now leads
+# with the user-controlled session title (/rename or ai-title) and MESSAGE
+# carries hook-supplied text, so strip leading dashes rather than silently
+# lose the notification.
+while [[ "$SUBTITLE" == -* ]]; do SUBTITLE="${SUBTITLE#-}"; done
+while [[ "$MESSAGE" == -* ]]; do MESSAGE="${MESSAGE#-}"; done
 
 # ── Fire notification with click-to-focus ──────────────────────────────────
 # Prefer `alerter` over terminal-notifier. `alerter` is always alert-style,
@@ -207,8 +262,35 @@ fire_with_alerter() {
     # either clicked the "Go to tab" action button, or clicked the
     # notification body itself (alerter reports @CONTENTCLICKED).
     # Keep ACTION_LABEL and the actions flag in sync.
+    #
+    # The blocking alerter's PID is exported to a per-session file so
+    # ghostty-notify-clear.sh can kill it on clear-on-focus or on the next
+    # prompt. Its output has to route through a temp file for that: a
+    # command substitution would not reveal the PID until alerter already
+    # exited. A killed alerter yields an empty action → whitelist ignores.
+    #
+    # The stale pidfile is dropped HERE, synchronously, before either
+    # background job starts — that is what lets the watcher spawned below
+    # treat any PID it later reads as belonging to this round. The subshell
+    # deliberately does NOT delete the pidfile when its alerter concludes:
+    # a newer round may already have claimed the name, and deleting it
+    # would strand that round's alert with no watcher and no way to kill
+    # the blocking process.
+    local PID_FILE="$SAVE_DIR/${SESSION_ID}.alerter-pid"
+    mkdir -p "$SAVE_DIR" 2>/dev/null
+    rm -f "$PID_FILE" 2>/dev/null
     (
-        action=$("$ALERTER" "${args[@]}" 2>/dev/null)
+        out=$(mktemp "${TMPDIR:-/tmp}/ghostty-notify-action.XXXXXX" 2>/dev/null) || out=""
+        if [[ -n "$out" ]]; then
+            "$ALERTER" "${args[@]}" > "$out" 2>/dev/null &
+            apid=$!
+            printf '%s\n' "$apid" > "$PID_FILE" 2>/dev/null
+            wait "$apid"
+            action=$(cat "$out" 2>/dev/null)
+            rm -f "$out" 2>/dev/null
+        else
+            action=$("$ALERTER" "${args[@]}" 2>/dev/null)
+        fi
         case "$action" in
             "$ACTION_LABEL"|@CONTENTCLICKED)
                 [[ -x "$FOCUS_SCRIPT" ]] && "$FOCUS_SCRIPT" "$SESSION_ID"
@@ -216,6 +298,9 @@ fire_with_alerter() {
         esac
     ) </dev/null >/dev/null 2>&1 &
     disown
+    # Tell the watcher a pidfile is coming, so it won't "clear" before the
+    # notification has actually been delivered.
+    EXPECT_ALERTER=1
     return 0
 }
 
@@ -233,8 +318,11 @@ fire_with_terminal_notifier() {
         -group "$GROUP_ID"
     )
     [[ "$SILENT" != "true" ]] && args+=(-sound "$SOUND")
+    # Propagate the real exit status: a terminal-notifier that fails (e.g.
+    # its bundle isn't authorized for notifications) must not be reported
+    # as "fired", or the caller spawns a clear-on-focus watcher to poll for
+    # ~20 minutes after a notification that was never displayed.
     terminal-notifier "${args[@]}" >/dev/null 2>&1
-    return 0
 }
 
 # Backend selection. Default: prefer alerter (supports click-to-jump), fall
@@ -248,14 +336,41 @@ fire_with_terminal_notifier() {
 #                           rather than dropping the notification silently
 #   - unset / "auto"      : prefer alerter, fall back to terminal-notifier
 BACKEND="${GHOSTTY_NOTIFY_BACKEND:-auto}"
+FIRED=0
+EXPECT_ALERTER=0
 case "$BACKEND" in
     terminal-notifier)
-        fire_with_terminal_notifier
+        fire_with_terminal_notifier && FIRED=1
         ;;
     *)
-        fire_with_alerter || fire_with_terminal_notifier
+        { fire_with_alerter || fire_with_terminal_notifier; } && FIRED=1
         ;;
 esac
+
+# ── Clear-on-focus watcher ─────────────────────────────────────────────────
+# Focusing the session's tab (or Ghostty itself when the tab is unknown)
+# dismisses the notification: once you're looking at the session, the alert
+# has done its job and would otherwise sit in the corner until clicked or
+# timed out. Opt out with GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0. Sibling
+# resolution mirrors FOCUS_SCRIPT above.
+#
+# Only an explicit off value disables it: an unrecognized setting falls
+# back to the documented default (on), matching how the numeric knobs above
+# fail back to theirs instead of silently changing behavior. Keep this list
+# in sync with ghostty-round-reset.sh, which gates the same feature.
+case "${GHOSTTY_NOTIFY_CLEAR_ON_FOCUS:-1}" in
+    0|false|no|off|FALSE|NO|OFF) CLEAR_ON_FOCUS=0 ;;
+    *) CLEAR_ON_FOCUS=1 ;;
+esac
+if [[ "$FIRED" -eq 1 && "$CLEAR_ON_FOCUS" -eq 1 ]]; then
+    CLEAR_SCRIPT="${GHOSTTY_NOTIFY_CLEAR_SCRIPT:-$SCRIPT_DIR/ghostty-notify-clear.sh}"
+    [[ -x "$CLEAR_SCRIPT" ]] || CLEAR_SCRIPT="$HOME/.claude/hooks/ghostty-notify-clear.sh"
+    if [[ -x "$CLEAR_SCRIPT" ]]; then
+        GHOSTTY_NOTIFY_EXPECT_ALERTER="$EXPECT_ALERTER" \
+            "$CLEAR_SCRIPT" --watch "$SESSION_ID" </dev/null >/dev/null 2>&1 &
+        disown
+    fi
+fi
 
 clear_start_on_stop
 exit 0
