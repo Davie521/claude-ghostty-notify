@@ -58,6 +58,9 @@ export GHOSTTY_NOTIFY_BACKEND=auto   # pin against host env overrides
 # Not under test, and its watcher would poll the real lsappinfo/osascript
 # and outlive the run (see tests/test-clear-on-focus.sh for its coverage).
 export GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0
+# Belt and braces next to CLEAR_ON_FOCUS=0: never hand off to a locally built
+# native watcher (tests/test-swift-watcher.sh owns that path).
+export GHOSTTY_NOTIFY_WATCHER_BIN=""
 unset GHOSTTY_RESOURCES_DIR || true
 
 # The sid MUST be UUID-shaped (hex + dashes, matching ^[a-fA-F0-9-]+$).

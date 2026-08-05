@@ -63,6 +63,9 @@ export GHOSTTY_NOTIFY_BACKEND=auto         # pin: a host env override (e.g.
 # stubbed here and would poll the real lsappinfo/osascript for 30s past the
 # run. Covered by tests/test-clear-on-focus.sh instead.
 export GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0
+# Belt and braces next to CLEAR_ON_FOCUS=0: never hand off to a locally built
+# native watcher (tests/test-swift-watcher.sh owns that path).
+export GHOSTTY_NOTIFY_WATCHER_BIN=""
 unset GHOSTTY_RESOURCES_DIR || true
 
 pass=0; fail=0

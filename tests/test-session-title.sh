@@ -52,6 +52,9 @@ export GHOSTTY_NOTIFY_BACKEND=auto   # pin against host env overrides
 # runs the terminal-notifier stub with -remove, truncating the very TN_LOG
 # these assertions read. Leaves no stray pollers behind either.
 export GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0
+# Belt and braces next to CLEAR_ON_FOCUS=0: never hand off to a locally built
+# native watcher (tests/test-swift-watcher.sh owns that path).
+export GHOSTTY_NOTIFY_WATCHER_BIN=""
 unset GHOSTTY_RESOURCES_DIR || true
 
 pass=0; fail=0

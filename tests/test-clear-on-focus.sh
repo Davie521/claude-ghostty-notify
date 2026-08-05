@@ -130,6 +130,11 @@ export GHOSTTY_NOTIFY_SOUND_ELAPSED=9999
 export GHOSTTY_NOTIFY_TIMEOUT=20
 export GHOSTTY_NOTIFY_BACKEND=auto
 export GHOSTTY_NOTIFY_FOCUS_POLL=0.2
+# Pin the bash watcher. This file is the regression guard for the shell
+# implementation, so it must never hand off to a locally built native watcher
+# (tests/test-swift-watcher.sh covers that path). The empty value relies on
+# the hand-off using `${VAR-default}`, not `${VAR:-default}`.
+export GHOSTTY_NOTIFY_WATCHER_BIN=""
 unset GHOSTTY_RESOURCES_DIR || true
 unset GHOSTTY_NOTIFY_CLEAR_ON_FOCUS || true
 unset GHOSTTY_NOTIFY_CLEAR_SCRIPT || true
