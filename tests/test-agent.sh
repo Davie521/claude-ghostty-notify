@@ -84,6 +84,14 @@ wait_for() {
     return 1
 }
 
+# Negative assertions go through a predicate function: `check` invokes "$@"
+# directly, which cannot carry a `!` or a subshell.
+rejects() { ! "$@"; }
+stale_app_is_rejected() {
+    ( export GHOSTTY_NOTIFY_AGENT_APP="$SANDBOX/gone.app"
+      agent_app "$REPO/hooks" >/dev/null )
+}
+
 log_has() { grep -qF "$1" "$LOG" 2>/dev/null; }
 state_outstanding() {
     # Prints the outstanding notification ids for a session, comma-joined.
@@ -111,67 +119,118 @@ check "agent logs its bundle identity (proves it is bundled, not a bare binary)"
 
 # Everything below is meaningless if the agent is not actually draining, so
 # establish that first with a request whose only effect is a log line.
-agent_send '{"type":"ping"}' "$APP"
+agent_queue '{"type":"ping"}' "$APP"
 check "spool transport delivers (ping answered)" wait_for 10 log_has "pong"
 check "consumed request files are removed" wait_for 10 spool_drained
 
-# ── 2. notify records an identifier ────────────────────────────────────────
-agent_send "$(jq -nc --arg s "$SID" \
+# ── 2. Readiness is published, and gates delivery ──────────────────────────
+# The severest defect this file guards: a spool write is NOT a delivered
+# notification. Unless the agent says it is authorized, agent_deliver has to
+# fail so ghostty-notify.sh falls back to alerter/terminal-notifier instead of
+# silently swallowing the notification.
+check "agent publishes its authorization answer" wait_for 20 test -s "$ROOT/ready"
+printf 'denied\n' > "$ROOT/ready"
+check "agent_deliver refuses when notifications are not authorized" \
+    rejects agent_deliver '{"type":"ping"}' "$APP"
+printf 'authorized\n' > "$ROOT/ready"
+check "agent_deliver accepts once authorized" \
+    agent_deliver '{"type":"ping"}' "$APP"
+# A stale bundle path must not be trusted either — routing into a spool nothing
+# drains is the same silent-drop failure by another route.
+check "a non-existent GHOSTTY_NOTIFY_AGENT_APP is rejected" \
+    rejects stale_app_is_rejected
+# An empty payload means the caller's jq failed; queuing it would look like a
+# delivered notification to the caller and an undecodable file to the agent.
+check "an empty payload is refused rather than queued" \
+    rejects agent_deliver "" "$APP"
+
+# ── 3. notify records a stable identifier ──────────────────────────────────
+agent_queue "$(jq -nc --arg s "$SID" \
     '{type:"notify",session_id:$s,title:"Claude ✅",subtitle:"sub",body:"done",sound:"Glass"}')" \
     "$APP"
-check "notify posts and records claude-<session>-1" \
-    wait_for 10 log_has "posted claude-$SID-1"
+check "notify posts and records claude-<session>" \
+    wait_for 10 log_has "posted claude-$SID"
 check "state.json lists the identifier as outstanding" \
-    wait_for 10 test "$(state_outstanding "$SID")" = "claude-$SID-1"
+    wait_for 10 test "$(state_outstanding "$SID")" = "claude-$SID"
 
-# ── 3. A second session's notification is tracked separately ───────────────
-agent_send "$(jq -nc --arg s "$OTHER" '{type:"notify",session_id:$s,title:"other"}')" "$APP"
+# Posting again must reuse the identifier: that is what makes the notification
+# center REPLACE the banner instead of stacking a second one, which is the
+# behaviour `-group ghostty-notify-<session>` gave both shell backends.
+agent_queue "$(jq -nc --arg s "$SID" '{type:"notify",session_id:$s,title:"again"}')" "$APP"
+check "a repeat notification replaces rather than stacks" \
+    wait_for 10 test "$(state_outstanding "$SID")" = "claude-$SID"
+
+# ── 4. A second session's notification is tracked separately ───────────────
+agent_queue "$(jq -nc --arg s "$OTHER" '{type:"notify",session_id:$s,title:"other"}')" "$APP"
 check "a second session gets its own identifier" \
-    wait_for 10 test "$(state_outstanding "$OTHER")" = "claude-$OTHER-2"
+    wait_for 10 test "$(state_outstanding "$OTHER")" = "claude-$OTHER"
 
-# ── 4. dismiss withdraws only the session it names ─────────────────────────
-agent_send "$(jq -nc --arg s "$SID" '{type:"dismiss",session_id:$s}')" "$APP"
+# ── 5. dismiss withdraws only the session it names ─────────────────────────
+agent_queue "$(jq -nc --arg s "$SID" '{type:"dismiss",session_id:$s}')" "$APP"
 check "dismiss withdraws the named session's notification" \
-    wait_for 10 log_has "withdrew claude-$SID-1"
+    wait_for 10 log_has "withdrew claude-$SID"
 check "dismissed session has nothing outstanding" \
     wait_for 10 test "$(state_outstanding "$SID")" = ""
 # The bug this guards: a dismiss that clears every session would silently
 # destroy a sibling session's still-unread notification.
 check "the other session's notification survives" \
-    test "$(state_outstanding "$OTHER")" = "claude-$OTHER-2"
+    test "$(state_outstanding "$OTHER")" = "claude-$OTHER"
 
-# ── 5. anchor is recorded ──────────────────────────────────────────────────
-# Ghostty may not be running here, in which case the surface stays unknown —
-# that is a legitimate outcome and the log records which one happened.
-agent_send "$(jq -nc --arg s "$SID" '{type:"anchor",session_id:$s}')" "$APP"
-check "anchor is processed" wait_for 10 log_has "anchored $SID -> "
+# ── 6. anchor prefers the id the hook supplies ─────────────────────────────
+# Sampling the focused tab at drain time anchors a session to whatever tab the
+# user happens to be on by then, so a hook-supplied id must win outright.
+agent_queue "$(jq -nc --arg s "$SID" \
+    '{type:"anchor",session_id:$s,tab_id:"BEEF-TAB"}')" "$APP"
+check "a hook-supplied tab id is recorded verbatim" \
+    wait_for 10 log_has "anchored $SID -> BEEF-TAB"
+check "state.json records the tab" \
+    test "$(jq -r --arg s "$SID" '.sessions[$s].tabID // ""' "$STATE")" = "BEEF-TAB"
 
-# ── 6. Garbage does not wedge the drain ────────────────────────────────────
+# ── 7. Garbage does not wedge the drain ────────────────────────────────────
 # A poison file is unlinked before it is decoded, so it must be dropped once and
 # never retried — and the next good request must still be served.
-agent_send 'not json at all' "$APP"
-agent_send "$(jq -nc --arg s "../escape" '{type:"notify",session_id:$s,title:"evil"}')" "$APP"
-agent_send '{"type":"selfDestruct"}' "$APP"
+PONGS_BEFORE=$(grep -cF pong "$LOG")
+agent_queue 'not json at all' "$APP"
+agent_queue "$(jq -nc --arg s "../escape" '{type:"notify",session_id:$s,title:"evil"}')" "$APP"
+agent_queue '{"type":"selfDestruct"}' "$APP"
 check "malformed requests are dropped, not retried" wait_for 10 spool_drained
-agent_send '{"type":"ping"}' "$APP"
+agent_queue '{"type":"ping"}' "$APP"
 check "the agent still serves requests after garbage" \
-    wait_for 10 test "$(grep -cF pong "$LOG")" -ge 2
+    wait_for 10 test "$(grep -cF pong "$LOG")" -gt "$PONGS_BEFORE"
 # A rejected session id must not have created a record.
 check "an invalid session id creates no state" \
     test "$(jq -r '.sessions | has("../escape")' "$STATE" 2>/dev/null)" = "false"
 
-# ── 7. State survives a restart without reusing identifiers ────────────────
+# ── 8. A queued notify that went stale is not replayed ─────────────────────
+# Otherwise an agent that was down all evening posts the whole backlog at once
+# on the next login — banners for rounds that finished hours ago. Backdating the
+# file is exactly what a long outage looks like to the agent.
+#
+# Build and backdate it OUTSIDE the spool, then rename it in: creating it in
+# place would let the watcher consume it as a fresh request before `touch` ran.
+# rename(2) does not alter mtime, which is what the agent sorts and ages on.
+STALE="$SANDBOX/stale.json"
+jq -nc --arg s "$OTHER" '{type:"notify",session_id:$s,title:"ancient"}' > "$STALE"
+touch -t 200001010000 "$STALE"
+mv "$STALE" "$ROOT/spool/0000000000000001-stale.json"
+check "a stale notify is dropped, not replayed" wait_for 10 log_has "dropped stale notify"
+
+# ── 9. State survives a restart, keeping the identifier stable ──────────────
 kill "$AGENT_PID" 2>/dev/null
 wait "$AGENT_PID" 2>/dev/null || true
 AGENT_PID=""
 "$BIN" >/dev/null 2>&1 &
 AGENT_PID=$!
 check "restarted agent reloads its sessions" wait_for 15 log_has "restored "
-agent_send "$(jq -nc --arg s "$SID" '{type:"notify",session_id:$s,title:"after restart"}')" "$APP"
-# Reusing claude-<session>-1 here would collide with a notification that may
-# still be on screen from before the restart.
-check "identifiers are not reused after a restart" \
-    wait_for 10 test "$(state_outstanding "$SID")" = "claude-$SID-3"
+check "readiness is republished after a restart" wait_for 20 test -s "$ROOT/ready"
+printf 'authorized\n' > "$ROOT/ready"
+agent_queue "$(jq -nc --arg s "$SID" '{type:"notify",session_id:$s,title:"after restart"}')" "$APP"
+# A changed identifier here would post a SECOND banner beside one that may still
+# be on screen from before the restart, instead of replacing it.
+check "the identifier is still stable after a restart" \
+    wait_for 10 test "$(state_outstanding "$SID")" = "claude-$SID"
+check "the tab resolved before the restart survived it" \
+    test "$(jq -r --arg s "$SID" '.sessions[$s].tabID // ""' "$STATE")" = "BEEF-TAB"
 
 echo
 echo "Results: $pass passed, $fail failed"

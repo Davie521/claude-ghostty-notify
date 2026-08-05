@@ -17,6 +17,9 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     private var spool: SpoolWatcher?
     private var pruneTimer: DispatchSourceTimer?
     private var activationObserver: NSObjectProtocol?
+    /// Per-identifier expiry timers, so a replacement notification restarts the
+    /// clock instead of inheriting the old one's deadline.
+    private var expiryTimers: [String: DispatchSourceTimer] = [:]
 
     init(paths: AgentPaths) {
         self.paths = paths
@@ -39,10 +42,11 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         notifier.requestAuthorization { [weak self] granted in
             guard let self else { return }
             self.log("authorization granted=\(granted)")
+            // Publish the answer: until this file says "authorized", the hooks
+            // must not treat a spooled request as a delivered notification, or a
+            // user who clicked "Don't Allow" would silently get nothing at all.
+            self.publishReadiness(granted)
             if !granted {
-                // Keep serving anyway: draining the spool stops requests piling
-                // up, dismiss/anchor still work, and the user may grant the
-                // permission later without restarting us.
                 self.log("notifications are not authorized — see System Settings › Notifications")
             }
         }
@@ -62,6 +66,9 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     func applicationWillTerminate(_ notification: Notification) {
         saveState()
         try? FileManager.default.removeItem(atPath: paths.pidFile)
+        // Readiness is about a live agent, so it must not outlive the process:
+        // a stale "authorized" would keep hooks routing into a dead spool.
+        try? FileManager.default.removeItem(atPath: paths.readyFile)
         log("agent down")
     }
 
@@ -70,32 +77,124 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     private func handle(_ request: AgentRequest) {
         switch request {
         case .notify(let notify):
-            let identifier = state.newNotification(sessionID: notify.sessionID, now: Agent.now())
-            notifier.post(
-                identifier: identifier, sessionID: notify.sessionID, request: notify)
-            log("posted \(identifier)")
-            saveState()
+            // A tab id supplied by the hook is authoritative: it came from the
+            // marker round-trip, which is correct regardless of what is focused
+            // now. Record it before deciding anything.
+            state.anchor(sessionID: notify.sessionID, tabID: notify.tabID, now: Agent.now())
+            deliver(notify)
+            shortenIfAlreadyWatching(notify)
 
         case .dismiss(let sessionID):
             let identifiers = state.takeNotifications(sessionID: sessionID)
+            cancelExpiry(identifiers)
             notifier.withdraw(identifiers)
             saveState()
 
-        case .anchor(let sessionID):
-            // The hook that sends this fires on UserPromptSubmit, so the user
-            // has just typed into their own surface — whatever Ghostty reports
-            // as focused belongs to this session.
-            state.anchor(
-                sessionID: sessionID, tabID: Ghostty.focusedTerminalID(), now: Agent.now())
-            log("anchored \(sessionID) -> \(state.sessions[sessionID]?.tabID ?? "<unknown>")")
-            saveState()
+        case .anchor(let sessionID, let tabID):
+            if let tabID {
+                state.anchor(sessionID: sessionID, tabID: tabID, now: Agent.now())
+                log("anchored \(sessionID) -> \(tabID)")
+                saveState()
+            } else {
+                // No id from the hook (tmux, or the marker round-trip never
+                // succeeded). Sampling the focused tab is a guess — the drain
+                // can run a second after the prompt was submitted — so it only
+                // fills a gap, never overwrites a known id.
+                let known = state.sessions[sessionID]?.tabID
+                guard known == nil else {
+                    state.anchor(sessionID: sessionID, tabID: known, now: Agent.now())
+                    saveState()
+                    return
+                }
+                Ghostty.selectedTabID { [weak self] selected in
+                    guard let self else { return }
+                    self.state.anchor(
+                        sessionID: sessionID, tabID: selected, now: Agent.now())
+                    self.log("anchored \(sessionID) -> \(selected ?? "<unknown>") (sampled)")
+                    self.saveState()
+                }
+            }
 
         case .ping:
             log("pong")
         }
     }
 
+    /// Restores the shell watcher's "already staring at it" clear.
+    ///
+    /// No activation event ever fires when the user watched the round finish in
+    /// the session's own tab, because Ghostty never stopped being frontmost — so
+    /// without this the notification would sit there until a prompt or a click.
+    ///
+    /// The notification is posted first and only its expiry is shortened, rather
+    /// than suppressed outright: the shell path played the sound and then
+    /// removed the banner about a second later, and swallowing the request
+    /// entirely would take the audible cue with it. Three seconds is the grace
+    /// Ghostty itself uses for a notification raised on an already-focused
+    /// surface, and posting first keeps the banner immediate — the Apple Event
+    /// happens after delivery, never in front of it.
+    private func shortenIfAlreadyWatching(_ notify: NotifyRequest) {
+        guard notify.clearOnFocus,
+            frontmostIsGhostty,
+            let tabID = state.sessions[notify.sessionID]?.tabID
+        else { return }
+
+        let identifier = SessionState.notificationID(sessionID: notify.sessionID)
+        Ghostty.selectedTabID { [weak self] selected in
+            guard let self, let selected, selected == tabID else { return }
+            self.log("\(notify.sessionID) is already on screen; clearing in short order")
+            self.scheduleExpiry(identifier: identifier, after: Agent.watchedGraceSeconds)
+        }
+    }
+
+    private static let watchedGraceSeconds: Double = 3
+
+    private func deliver(_ notify: NotifyRequest) {
+        let identifier = state.newNotification(
+            sessionID: notify.sessionID, clearOnFocus: notify.clearOnFocus, now: Agent.now())
+        notifier.post(identifier: identifier, sessionID: notify.sessionID, request: notify)
+        log("posted \(identifier)")
+        scheduleExpiry(identifier: identifier, after: notify.timeout)
+        saveState()
+    }
+
+    /// Mirrors the shell path's `--timeout`: without it a notification for a
+    /// session the user never returns to would sit in Notification Center until
+    /// the 24h prune, rather than the documented GHOSTTY_NOTIFY_TIMEOUT.
+    private func scheduleExpiry(identifier: String, after seconds: Double?) {
+        expiryTimers.removeValue(forKey: identifier)?.cancel()
+        guard let seconds, seconds > 0 else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + seconds, leeway: .seconds(1))
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.expiryTimers.removeValue(forKey: identifier)
+                guard let sessionID = self.state.sessionID(forNotification: identifier) else {
+                    return
+                }
+                let identifiers = self.state.takeNotifications(sessionID: sessionID)
+                self.notifier.withdraw(identifiers)
+                self.log("expired \(identifier)")
+                self.saveState()
+            }
+        }
+        timer.resume()
+        expiryTimers[identifier] = timer
+    }
+
+    private func cancelExpiry(_ identifiers: [String]) {
+        for identifier in identifiers {
+            expiryTimers.removeValue(forKey: identifier)?.cancel()
+        }
+    }
+
     // MARK: - Focus
+
+    private var frontmostIsGhostty: Bool {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            == AgentConstants.ghosttyBundleID
+    }
 
     /// The replacement for the shell version's one-second poll loop. macOS tells
     /// us when an app comes forward; between events this process is idle and
@@ -124,25 +223,30 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     private func withdrawForGhostty(retriesLeft: Int) {
-        let identifiers = state.takeNotifications(
-            for: .ghosttyActivated(selectedTabID: Ghostty.focusedTerminalID()))
-        if !identifiers.isEmpty {
-            notifier.withdraw(identifiers)
-            saveState()
-            return
-        }
-        // Ghostty's scripting state can trail the activation by a few
-        // milliseconds, so a query issued the instant it comes forward may name
-        // the previously selected surface. One retry covers that without
-        // reintroducing a poll; if there is nothing outstanding, don't bother.
-        guard retriesLeft > 0, hasOutstandingNotifications else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
-            self?.withdrawForGhostty(retriesLeft: retriesLeft - 1)
-        }
-    }
+        // Cheap guard first. Asking Ghostty which tab is selected is an Apple
+        // Event round-trip, and the first one raises the Automation consent
+        // dialog — neither belongs on a plain Cmd-Tab with nothing on screen.
+        guard state.hasOutstandingNotifications else { return }
 
-    private var hasOutstandingNotifications: Bool {
-        state.sessions.values.contains { !$0.notificationIDs.isEmpty }
+        Ghostty.selectedTabID { [weak self] selected in
+            guard let self else { return }
+            let identifiers = self.state.takeNotifications(
+                for: .ghosttyActivated(selectedTabID: selected))
+            if !identifiers.isEmpty {
+                self.cancelExpiry(identifiers)
+                self.notifier.withdraw(identifiers)
+                self.saveState()
+                return
+            }
+            // Ghostty's scripting state can trail the activation by a few
+            // milliseconds, so a query issued the instant it comes forward may
+            // name the previously selected tab. One retry covers that without
+            // reintroducing a poll.
+            guard retriesLeft > 0, self.state.hasOutstandingNotifications else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.withdrawForGhostty(retriesLeft: retriesLeft - 1)
+            }
+        }
     }
 
     // MARK: - Clicks
@@ -167,7 +271,11 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     private func clicked(identifier: String, action: String, sessionID: String?) {
+        // Fall back to the bookkeeping when userInfo is unavailable, so a click
+        // still routes after an upgrade that changed the payload.
+        let session = sessionID ?? state.sessionID(forNotification: identifier)
         state.forgetNotification(identifier)
+        cancelExpiry([identifier])
         saveState()
 
         switch action {
@@ -178,7 +286,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             // tests/test-alerter-dispatch.sh exists.
             log("dismissed \(identifier)")
         case UNNotificationDefaultActionIdentifier, AgentConstants.gotoActionID:
-            jump(sessionID: sessionID)
+            jump(sessionID: session)
         default:
             log("ignored action \(action) on \(identifier)")
         }
@@ -197,19 +305,40 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     private func jump(sessionID: String?) {
-        guard let sessionID, let tabID = state.sessions[sessionID]?.tabID else {
-            // No surface was ever resolved (tmux, unscriptable Ghostty). Front
-            // the app so the user is one keystroke away instead of nowhere.
-            log("jump: no surface for \(sessionID ?? "<none>"), activating Ghostty")
+        // Prefer live bookkeeping, then the id ghostty-tab-save.sh persisted —
+        // which survives an agent that lost its state file.
+        var tabID = sessionID.flatMap { state.sessions[$0]?.tabID }
+        if tabID == nil, let sessionID {
+            tabID = Agent.persistedTabID(paths: paths, sessionID: sessionID)
+        }
+        guard let tabID else {
+            // No tab was ever resolved (tmux, unscriptable Ghostty). Front the
+            // app so the user is one keystroke away instead of nowhere.
+            log("jump: no tab for \(sessionID ?? "<none>"), activating Ghostty")
             Ghostty.activate()
             return
         }
-        if Ghostty.focus(terminalID: tabID) {
-            log("jump: focused \(tabID)")
-        } else {
-            log("jump: \(tabID) is gone, activating Ghostty")
-            Ghostty.activate()
+        Ghostty.focus(tabID: tabID) { [weak self] ok in
+            guard let self else { return }
+            if ok {
+                self.log("jump: focused \(tabID)")
+            } else {
+                self.log("jump: \(tabID) is gone, activating Ghostty")
+                Ghostty.activate()
+            }
         }
+    }
+
+    /// Reads the tab id ghostty-tab-save.sh wrote for a session.
+    private static func persistedTabID(paths: AgentPaths, sessionID: String) -> String? {
+        guard RequestCodec.isValidSessionID(sessionID) else { return nil }
+        let path = paths.sessionTabFile(sessionID: sessionID)
+        guard let data = FileManager.default.contents(atPath: path),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let tabID = object["tab_id"] as? String,
+            !tabID.isEmpty
+        else { return nil }
+        return tabID
     }
 
     // MARK: - Housekeeping
@@ -222,6 +351,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 guard let self else { return }
                 let orphaned = self.state.prune(
                     maxAge: AgentConstants.sessionMaxAge, now: Agent.now())
+                self.cancelExpiry(orphaned)
                 self.notifier.withdraw(orphaned)
                 self.saveState()
             }
@@ -234,6 +364,11 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         try? "\(getpid())\n".write(toFile: paths.pidFile, atomically: true, encoding: .utf8)
     }
 
+    private func publishReadiness(_ granted: Bool) {
+        let value = granted ? AgentConstants.readyAuthorized : AgentConstants.readyDenied
+        try? (value + "\n").write(toFile: paths.readyFile, atomically: true, encoding: .utf8)
+    }
+
     private func loadState() {
         guard let data = FileManager.default.contents(atPath: paths.state) else { return }
         state = StateCodec.decode(data)
@@ -243,11 +378,9 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     private func saveState() {
         guard let data = try? StateCodec.encode(state) else { return }
         // Atomic: a crash mid-write must not leave bookkeeping that decodes to
-        // half a truth.
-        let temporary = paths.state + ".tmp"
-        guard FileManager.default.createFile(atPath: temporary, contents: data) else { return }
-        _ = try? FileManager.default.replaceItemAt(
-            URL(fileURLWithPath: paths.state), withItemAt: URL(fileURLWithPath: temporary))
+        // half a truth. `Data.write(options: .atomic)` handles the
+        // does-not-exist-yet case, which replaceItemAt does not.
+        try? data.write(to: URL(fileURLWithPath: paths.state), options: [.atomic])
     }
 
     private static func now() -> Double { Date().timeIntervalSince1970 }
@@ -262,12 +395,4 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 private struct UncheckedBox<T>: @unchecked Sendable {
     let value: T
     init(_ value: T) { self.value = value }
-}
-
-extension FileManager {
-    /// `createFile(atPath:contents:attributes:)` spelled without the optional
-    /// dance, so `saveState` reads as one decision.
-    fileprivate func createFile(atPath path: String, contents: Data) -> Bool {
-        createFile(atPath: path, contents: contents, attributes: nil)
-    }
 }

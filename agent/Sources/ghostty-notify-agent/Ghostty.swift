@@ -1,54 +1,67 @@
 import Foundation
 
-/// Apple Events to Ghostty, sent in-process.
+/// Apple Events to Ghostty, sent in-process — no `osascript` fork, which is the
+/// whole reason the polling loop moved into a resident app.
 ///
-/// `NSAppleScript` compiles and runs inside this process, so none of this forks
-/// `osascript` — the whole reason the polling loop moved into a resident app.
-/// Every call goes through the main thread (Apple Event dispatch wants a run
-/// loop) and every call is allowed to fail: Ghostty may not be running, may not
-/// be scriptable, or the user may have denied the Automation prompt. A nil
-/// result always means "don't know", never "no".
+/// Every send runs on one dedicated serial queue, never on the main actor.
+/// `NSAppleScript` is not thread-safe, hence serial; and
+/// `executeAndReturnError` blocks until the round-trip completes, which for the
+/// *first* event means blocking until the user answers the modal
+/// "wants to control Ghostty" consent prompt. On the main actor that would wedge
+/// the spool drain, the notification posting and the activation observer behind
+/// a dialog the user may not notice for minutes.
+///
+/// Results come back on the main actor. A nil result always means "don't know"
+/// — Ghostty may not be running, may not be scriptable, or consent may have been
+/// denied — never "no".
 ///
 /// Reaching Ghostty at all requires NSAppleEventsUsageDescription in the app
 /// bundle's Info.plist; without it macOS denies the event instead of prompting.
 enum Ghostty {
-    /// Surface the user is looking at right now, as a terminal UUID.
+    private static let queue = DispatchQueue(
+        label: "com.ghostty-notify.applescript", qos: .userInitiated)
+
+    /// Tab the user is looking at right now.
     ///
-    /// `focused terminal of selected tab of front window` is Ghostty's own
-    /// idiom for "the active context" and resolves splits, which a tab id
-    /// cannot.
-    @MainActor
-    static func focusedTerminalID() -> String? {
-        let value = runReturningString(
+    /// Tab granularity, not surface granularity, on purpose: this has to compare
+    /// equal to the id `ghostty-tab-save.sh` persists, which is `id of tab`.
+    static func selectedTabID(_ completion: @escaping @MainActor (String?) -> Void) {
+        run(
             """
             tell application "Ghostty"
-                return id of focused terminal of selected tab of front window
+                return id of selected tab of front window
             end tell
-            """)
-        guard let value, isPlausibleTerminalID(value) else { return nil }
-        return value
+            """
+        ) { value in
+            completion(value.flatMap { isPlausibleTabID($0) ? $0 : nil })
+        }
     }
 
-    /// Raise the window owning `terminalID` and focus it. Ghostty's `focus`
-    /// command does both, unlike `select tab`, which selects inside a
-    /// background window and leaves the user staring at an unchanged screen.
-    @MainActor
-    @discardableResult
-    static func focus(terminalID: String) -> Bool {
+    /// Raise the window owning `tabID` and select it.
+    ///
+    /// `activate window` is required before `select tab`: selecting alone puts
+    /// the tab in front *inside a background window*, and the user sees nothing
+    /// change. Learned by ghostty-tab-focus.sh the hard way.
+    static func focus(tabID: String, _ completion: @escaping @MainActor (Bool) -> Void) {
         // The id comes from persisted state and is interpolated into script
         // source, so a crafted value could otherwise smuggle in `do shell
         // script`. Whitelist first, then escape — either alone would do, but
         // this is the one place where being wrong runs arbitrary code.
-        guard isPlausibleTerminalID(terminalID) else { return false }
-        let literal = appleScriptLiteral(terminalID)
-        return runReturningString(
+        guard isPlausibleTabID(tabID) else {
+            Task { @MainActor in completion(false) }
+            return
+        }
+        let literal = appleScriptLiteral(tabID)
+        run(
             """
             tell application "Ghostty"
+                activate
                 repeat with w in every window
-                    repeat with t in every terminal of w
+                    repeat with t in every tab of w
                         try
                             if (id of t as text) is \(literal) then
-                                focus t
+                                activate window w
+                                select tab t
                                 return "ok"
                             end if
                         end try
@@ -56,19 +69,19 @@ enum Ghostty {
                 end repeat
                 return ""
             end tell
-            """) == "ok"
+            """
+        ) { completion($0 == "ok") }
     }
 
     /// Degraded fallback for a click we cannot localize: at least put Ghostty in
     /// front so the user is one keystroke from their session.
-    @MainActor
     static func activate() {
-        _ = runReturningString(#"tell application "Ghostty" to activate"#)
+        run(#"tell application "Ghostty" to activate"#) { _ in }
     }
 
     /// Ghostty hands out UUID-shaped ids. Anything else is either not from
     /// Ghostty or is an attempt to inject script source.
-    static func isPlausibleTerminalID(_ id: String) -> Bool {
+    static func isPlausibleTabID(_ id: String) -> Bool {
         !id.isEmpty && id.count <= 128
             && id.allSatisfy { $0.isHexDigit || $0 == "-" }
     }
@@ -80,13 +93,19 @@ enum Ghostty {
         return "\"\(escaped)\""
     }
 
-    @MainActor
-    private static func runReturningString(_ source: String) -> String? {
-        guard let script = NSAppleScript(source: source) else { return nil }
-        var errorInfo: NSDictionary?
-        let result = script.executeAndReturnError(&errorInfo)
-        if errorInfo != nil { return nil }
-        guard let value = result.stringValue, !value.isEmpty else { return nil }
-        return value
+    private static func run(
+        _ source: String, _ completion: @escaping @MainActor (String?) -> Void
+    ) {
+        queue.async {
+            var result: String?
+            if let script = NSAppleScript(source: source) {
+                var errorInfo: NSDictionary?
+                let descriptor = script.executeAndReturnError(&errorInfo)
+                if errorInfo == nil, let value = descriptor.stringValue, !value.isEmpty {
+                    result = value
+                }
+            }
+            Task { @MainActor in completion(result) }
+        }
     }
 }

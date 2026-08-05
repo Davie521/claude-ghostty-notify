@@ -13,10 +13,15 @@ public enum AgentRequest: Equatable, Sendable {
     /// Withdraw every notification belonging to a session. Sent by the
     /// UserPromptSubmit hook: submitting a prompt proves the user is back.
     case dismiss(sessionID: String)
-    /// Record that this session lives in whichever Ghostty surface is focused
-    /// right now. Sent by UserPromptSubmit too — the user just typed into
-    /// their tab, so the focused surface is theirs by construction.
-    case anchor(sessionID: String)
+    /// Record which Ghostty tab a session lives in.
+    ///
+    /// `tabID` comes from the hook, which reads the id that
+    /// `ghostty-tab-save.sh` resolved with an OSC-2 marker round-trip. That id
+    /// is correct no matter what is focused later, which is why it is preferred
+    /// over the agent sampling the frontmost surface at drain time — the drain
+    /// can happen a second or more after the prompt was submitted, by which
+    /// point the user may be looking at a different tab entirely.
+    case anchor(sessionID: String, tabID: String?)
     /// Liveness probe used by the install script and the integration test.
     case ping
 }
@@ -28,19 +33,36 @@ public struct NotifyRequest: Equatable, Sendable {
     public var body: String
     /// Notification sound name; `nil` posts silently.
     public var sound: String?
+    /// Tab id if the hook already knows it, so the very first notification of a
+    /// session is localizable without waiting for an anchor.
+    public var tabID: String?
+    /// Withdraw the notification unconditionally after this many seconds.
+    /// Mirrors the shell path's `--timeout`. `nil` means it stays until focus,
+    /// a prompt, or a click removes it.
+    public var timeout: Double?
+    /// False when the user set GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0. Such a
+    /// notification is never withdrawn by a focus change — some people keep
+    /// them in Notification Center as a to-do list.
+    public var clearOnFocus: Bool
 
     public init(
         sessionID: String,
         title: String,
         subtitle: String = "",
         body: String = "",
-        sound: String? = nil
+        sound: String? = nil,
+        tabID: String? = nil,
+        timeout: Double? = nil,
+        clearOnFocus: Bool = true
     ) {
         self.sessionID = sessionID
         self.title = title
         self.subtitle = subtitle
         self.body = body
         self.sound = sound
+        self.tabID = tabID
+        self.timeout = timeout
+        self.clearOnFocus = clearOnFocus
     }
 }
 
@@ -85,6 +107,11 @@ public enum RequestCodec {
         func string(_ key: String) -> String {
             (object[key] as? String) ?? ""
         }
+        /// Absent or blank optional strings are "not supplied", never "".
+        func optional(_ key: String) -> String? {
+            let value = string(key)
+            return value.isEmpty ? nil : value
+        }
 
         switch type {
         case "notify":
@@ -92,21 +119,44 @@ public enum RequestCodec {
             guard !title.isEmpty else {
                 throw RequestDecodeError.missingField("title")
             }
-            // An explicit empty sound means "silent"; an absent key does too.
-            let sound = (object["sound"] as? String).flatMap { $0.isEmpty ? nil : $0 }
+            // A non-positive or unparseable timeout means "no timeout" rather
+            // than "expire immediately" — fail towards keeping the alert.
+            var timeout: Double?
+            if let number = object["timeout"] as? NSNumber, number.doubleValue > 0 {
+                timeout = number.doubleValue
+            } else if let text = object["timeout"] as? String, let value = Double(text),
+                value > 0
+            {
+                timeout = value
+            }
+            // Any explicit false disables clearing; anything else keeps the
+            // documented default on, matching how the shell hook reads the
+            // same switch.
+            var clearOnFocus = true
+            if let flag = object["clear_on_focus"] as? Bool {
+                clearOnFocus = flag
+            } else if let flag = object["clear_on_focus"] as? NSNumber {
+                clearOnFocus = flag.boolValue
+            } else if let text = object["clear_on_focus"] as? String {
+                clearOnFocus = !["0", "false", "no", "off"].contains(text.lowercased())
+            }
+
             return .notify(
                 NotifyRequest(
                     sessionID: try session(),
                     title: title,
                     subtitle: string("subtitle"),
                     body: string("body"),
-                    sound: sound
+                    sound: optional("sound"),
+                    tabID: optional("tab_id"),
+                    timeout: timeout,
+                    clearOnFocus: clearOnFocus
                 )
             )
         case "dismiss":
             return .dismiss(sessionID: try session())
         case "anchor":
-            return .anchor(sessionID: try session())
+            return .anchor(sessionID: try session(), tabID: optional("tab_id"))
         case "ping":
             return .ping
         default:
@@ -126,12 +176,16 @@ public enum RequestCodec {
                 "title": n.title,
                 "subtitle": n.subtitle,
                 "body": n.body,
+                "clear_on_focus": n.clearOnFocus,
             ]
             if let sound = n.sound { object["sound"] = sound }
+            if let tabID = n.tabID { object["tab_id"] = tabID }
+            if let timeout = n.timeout { object["timeout"] = timeout }
         case .dismiss(let sessionID):
             object = ["type": "dismiss", "session_id": sessionID]
-        case .anchor(let sessionID):
+        case .anchor(let sessionID, let tabID):
             object = ["type": "anchor", "session_id": sessionID]
+            if let tabID { object["tab_id"] = tabID }
         case .ping:
             object = ["type": "ping"]
         }

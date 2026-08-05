@@ -10,10 +10,11 @@ enum SpoolWriter {
         try? FileManager.default.createDirectory(
             atPath: directory, withIntermediateDirectories: true)
 
-        // Millisecond prefix keeps name order equal to arrival order, and the
-        // pid keeps two hooks in the same millisecond apart.
+        // `%016ld` — NOT `%016d`, which truncates a 64-bit Int to 32 bits and
+        // turns a millisecond stamp into a negative number, whose leading `-`
+        // then sorts ahead of every hook-written name.
         let stamp = Int(Date().timeIntervalSince1970 * 1000)
-        let name = String(format: "%016d-%d.json", stamp, Int(getpid()))
+        let name = String(format: "%016ld-%d.json", stamp, Int(getpid()))
         let temporary = directory + "/." + name + ".tmp"
         let final = directory + "/" + name
 
@@ -35,7 +36,7 @@ enum SpoolWriter {
 ///
 /// The transport is a directory of one-JSON-object files made visible by
 /// rename, which keeps the hooks pure bash — no client binary, no socket
-/// lifetime to manage, and an integration test can drive the whole agent by
+/// lifetime to manage — and an integration test can drive the whole agent by
 /// dropping files. A vnode source on the directory fd fires on the rename, so
 /// delivery is event-driven rather than polled.
 @MainActor
@@ -43,6 +44,7 @@ final class SpoolWatcher {
     private let directory: String
     private let onRequest: (AgentRequest) -> Void
     private let log: (String) -> Void
+    private let now: () -> Double
     private var source: DispatchSourceFileSystemObject?
     private var descriptor: CInt = -1
     private var sweep: DispatchSourceTimer?
@@ -50,10 +52,12 @@ final class SpoolWatcher {
     init(
         directory: String,
         log: @escaping (String) -> Void,
+        now: @escaping () -> Double = { Date().timeIntervalSince1970 },
         onRequest: @escaping (AgentRequest) -> Void
     ) {
         self.directory = directory
         self.log = log
+        self.now = now
         self.onRequest = onRequest
     }
 
@@ -74,7 +78,7 @@ final class SpoolWatcher {
         timer.setEventHandler { [weak self] in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                if !FileManager.default.fileExists(atPath: self.directory) || self.descriptor < 0 {
+                if self.descriptor < 0 || !FileManager.default.fileExists(atPath: self.directory) {
                     try? FileManager.default.createDirectory(
                         atPath: self.directory, withIntermediateDirectories: true)
                     self.attach()
@@ -104,7 +108,9 @@ final class SpoolWatcher {
                 guard let self else { return }
                 let data = source.data
                 if data.contains(.delete) || data.contains(.rename) {
-                    // Our inode is gone; the next sweep re-attaches.
+                    // Our inode is gone; the next sweep re-attaches. Drain first
+                    // in case the same event also carried a write.
+                    self.drain()
                     self.detach()
                     return
                 }
@@ -127,18 +133,46 @@ final class SpoolWatcher {
     private func drain() {
         let fm = FileManager.default
         guard let names = try? fm.contentsOfDirectory(atPath: directory) else { return }
-        // Hooks prefix filenames with a timestamp, so name order is arrival
-        // order — a dismiss must not overtake the notify it cancels.
-        for name in names.sorted() where name.hasSuffix(".json") {
-            let path = directory + "/" + name
-            let data = try? Data(contentsOf: URL(fileURLWithPath: path))
-            try? fm.removeItem(atPath: path)
-            guard let data else { continue }
-            do {
-                onRequest(try RequestCodec.decode(data))
-            } catch {
-                log("dropped \(name): \(error)")
+
+        // Order by modification time, not by name. The filename's timestamp
+        // prefix is only second-granular on the bash side (BSD `date` has no
+        // %N), so two requests written in the same second would otherwise sort
+        // arbitrarily — and `drain` depends on a dismiss never overtaking the
+        // notify it cancels. APFS keeps nanosecond mtimes, so this is the real
+        // arrival order; the name breaks ties.
+        let candidates =
+            names
+            .filter { $0.hasSuffix(".json") }
+            .map { name -> (name: String, path: String, modified: Double) in
+                let path = directory + "/" + name
+                let attributes = try? fm.attributesOfItem(atPath: path)
+                let date = attributes?[.modificationDate] as? Date
+                return (name, path, date?.timeIntervalSince1970 ?? 0)
             }
+            .sorted { ($0.modified, $0.name) < ($1.modified, $1.name) }
+
+        let cutoff = now() - AgentConstants.staleNotifyAge
+        for candidate in candidates {
+            let data = try? Data(contentsOf: URL(fileURLWithPath: candidate.path))
+            try? fm.removeItem(atPath: candidate.path)
+            guard let data else { continue }
+
+            let request: AgentRequest
+            do {
+                request = try RequestCodec.decode(data)
+            } catch {
+                log("dropped \(candidate.name): \(error)")
+                continue
+            }
+
+            // Replaying an old notify posts a banner for a round that finished
+            // hours ago; replaying an old dismiss or anchor is harmless and
+            // still useful, so only notify has an expiry.
+            if case .notify = request, candidate.modified < cutoff {
+                log("dropped stale notify \(candidate.name) (queued for too long)")
+                continue
+            }
+            onRequest(request)
         }
     }
 }

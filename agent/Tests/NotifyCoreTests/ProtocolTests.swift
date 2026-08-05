@@ -91,8 +91,75 @@ struct RequestDecodingTests {
 
     @Test func dismissAndAnchorAndPing() throws {
         #expect(try decode(#"{"type":"dismiss","session_id":"abc"}"#) == .dismiss(sessionID: "abc"))
-        #expect(try decode(#"{"type":"anchor","session_id":"abc"}"#) == .anchor(sessionID: "abc"))
+        #expect(
+            try decode(#"{"type":"anchor","session_id":"abc"}"#)
+                == .anchor(sessionID: "abc", tabID: nil))
         #expect(try decode(#"{"type":"ping"}"#) == .ping)
+    }
+
+    // The hook passes the tab id ghostty-tab-save.sh resolved, which beats the
+    // agent sampling whatever happens to be focused when it drains.
+    @Test func anchorCarriesTheTabIdWhenTheHookKnowsIt() throws {
+        #expect(
+            try decode(#"{"type":"anchor","session_id":"abc","tab_id":"TAB-1"}"#)
+                == .anchor(sessionID: "abc", tabID: "TAB-1"))
+        // An empty tab_id means "unknown", not a tab literally named "".
+        #expect(
+            try decode(#"{"type":"anchor","session_id":"abc","tab_id":""}"#)
+                == .anchor(sessionID: "abc", tabID: nil))
+    }
+
+    @Test func notifyCarriesTheTabIdTimeoutAndOptOut() throws {
+        let request = try decode(
+            """
+            {"type":"notify","session_id":"abc","title":"T","tab_id":"TAB-7",
+             "timeout":1200,"clear_on_focus":false}
+            """)
+        guard case .notify(let notify) = request else {
+            Issue.record("expected notify, got \(request)")
+            return
+        }
+        #expect(notify.tabID == "TAB-7")
+        #expect(notify.timeout == 1200)
+        #expect(notify.clearOnFocus == false)
+    }
+
+    // Both knobs are documented; their defaults must survive an absent field.
+    @Test func timeoutAndOptOutDefaults() throws {
+        guard case .notify(let notify) = try decode(
+            #"{"type":"notify","session_id":"abc","title":"T"}"#)
+        else {
+            Issue.record("expected notify")
+            return
+        }
+        #expect(notify.timeout == nil)
+        #expect(notify.clearOnFocus == true)
+    }
+
+    // A zero or negative timeout must mean "never expire", not "expire now" —
+    // fail towards keeping the alert on screen.
+    @Test(arguments: ["0", "-5", "\"\"", "\"nonsense\"", "null"])
+    func nonPositiveTimeoutMeansNoTimeout(_ literal: String) throws {
+        guard case .notify(let notify) = try decode(
+            #"{"type":"notify","session_id":"abc","title":"T","timeout":\#(literal)}"#)
+        else {
+            Issue.record("expected notify")
+            return
+        }
+        #expect(notify.timeout == nil)
+    }
+
+    // jq --argjson writes a real boolean, but a hook built by hand may pass the
+    // shell's string form. Both have to disable clearing.
+    @Test(arguments: ["false", "\"false\"", "\"0\"", "\"off\"", "\"NO\""])
+    func stringyFalseAlsoDisablesClearing(_ literal: String) throws {
+        guard case .notify(let notify) = try decode(
+            #"{"type":"notify","session_id":"abc","title":"T","clear_on_focus":\#(literal)}"#)
+        else {
+            Issue.record("expected notify")
+            return
+        }
+        #expect(notify.clearOnFocus == false)
     }
 
     @Test func unknownTypeIsRejected() {
@@ -119,10 +186,12 @@ struct RequestDecodingTests {
         let cases: [AgentRequest] = [
             .notify(
                 NotifyRequest(
-                    sessionID: "abc", title: "T", subtitle: "S", body: "B", sound: "Glass")),
+                    sessionID: "abc", title: "T", subtitle: "S", body: "B", sound: "Glass",
+                    tabID: "TAB-1", timeout: 1200, clearOnFocus: false)),
             .notify(NotifyRequest(sessionID: "abc", title: "T")),
             .dismiss(sessionID: "abc"),
-            .anchor(sessionID: "abc"),
+            .anchor(sessionID: "abc", tabID: "TAB-1"),
+            .anchor(sessionID: "abc", tabID: nil),
             .ping,
         ]
         for request in cases {

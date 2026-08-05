@@ -3,18 +3,29 @@
 # anything still on screen for it.
 #
 # Submitting a prompt is the cheapest possible proof that the user is back at
-# their terminal — free, exact, and it needs no polling. It also pins the
-# session to a surface: the user just typed into their own tab, so whatever
-# Ghostty reports as focused belongs to this session. That replaces the OSC-2
-# marker round-trip (write a marker title, sleep, scan every tab, restore the
-# title, under a lock) with one Apple Event inside a process that is already
-# running.
+# their terminal — free, exact, and it needs no polling.
 #
-# Anchor before dismiss: if the anchor is what teaches the agent this session's
-# surface, the very first notification should already be localizable.
+# The tab id is read from the file ghostty-tab-save.sh already wrote, NOT
+# sampled from whatever is focused when the agent gets around to the request:
+# the agent may drain a second or more later, by which point the user can be
+# looking at a different tab, and anchoring a session to the wrong tab both
+# withdraws its notification early and sends click-to-jump to someone else's
+# session.
+#
+# Anchor before dismiss so the agent knows this session's tab before it decides
+# what to withdraw.
 
 set -u
 IFS=$'\n\t'
+
+# Same gate every sibling hook applies. Without it this hook would start a
+# resident accessory app — and raise a notification-permission prompt — for
+# users running Claude Code in Terminal.app, iTerm or VS Code, who can never
+# receive a notification from this plugin because ghostty-notify.sh exits early
+# on those terminals.
+if [[ "${TERM_PROGRAM:-}" != "ghostty" ]] && [[ -z "${GHOSTTY_RESOURCES_DIR:-}" ]]; then
+    exit 0
+fi
 
 HOOK_DATA=""
 if [[ ! -t 0 ]]; then
@@ -34,7 +45,27 @@ source "$SCRIPT_DIR/agent-common.sh" 2>/dev/null || exit 0
 
 APP=$(agent_app "$SCRIPT_DIR") || exit 0
 
-agent_send "$(jq -nc --arg s "$SESSION_ID" '{type:"anchor",session_id:$s}')" "$APP"
-agent_send "$(jq -nc --arg s "$SESSION_ID" '{type:"dismiss",session_id:$s}')" "$APP"
+SAVE_FILE="$HOME/.claude/notifications/ghostty-sessions/${SESSION_ID}.json"
+TAB_ID=""
+[[ -f "$SAVE_FILE" ]] && TAB_ID=$(jq -r '.tab_id // empty' "$SAVE_FILE" 2>/dev/null)
+
+# An empty tab_id is sent as an absent field, which tells the agent to fill the
+# gap by sampling — a guess, but better than nothing for tmux sessions.
+if [[ -n "$TAB_ID" ]]; then
+    agent_queue "$(jq -nc --arg s "$SESSION_ID" --arg t "$TAB_ID" \
+        '{type:"anchor",session_id:$s,tab_id:$t}')" "$APP"
+else
+    agent_queue "$(jq -nc --arg s "$SESSION_ID" '{type:"anchor",session_id:$s}')" "$APP"
+fi
+
+# Honour the same opt-out as the shell watcher: someone who keeps completion
+# notifications in Notification Center as a to-do list must not have them
+# withdrawn by typing the next prompt. Keep this list in sync with
+# ghostty-notify.sh and ghostty-round-reset.sh.
+case "${GHOSTTY_NOTIFY_CLEAR_ON_FOCUS:-1}" in
+    0|false|no|off|FALSE|NO|OFF) exit 0 ;;
+esac
+
+agent_queue "$(jq -nc --arg s "$SESSION_ID" '{type:"dismiss",session_id:$s}')" "$APP"
 
 exit 0

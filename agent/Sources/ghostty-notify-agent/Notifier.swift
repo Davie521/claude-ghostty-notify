@@ -60,14 +60,20 @@ final class Notifier {
         content.subtitle = request.subtitle
         content.body = request.body
         content.categoryIdentifier = AgentConstants.categoryID
+        // Groups a session's notifications together in Notification Center, the
+        // way `-group ghostty-notify-<session>` did. Replacement itself comes
+        // from reusing the identifier, not from this.
+        content.threadIdentifier = "ghostty-notify-\(sessionID)"
         // Carried on the notification itself so a click can still be routed to a
         // session after the agent restarted and reloaded its bookkeeping.
         content.userInfo = ["session_id": sessionID]
         if let sound = request.sound {
-            content.sound = UNNotificationSound(named: UNNotificationSoundName(sound))
+            content.sound = Self.sound(named: sound)
         }
 
-        // trigger: nil delivers immediately.
+        // trigger: nil delivers immediately. Re-adding an identifier that is
+        // already delivered replaces it, which is the group behaviour the shell
+        // backends had.
         let notification = UNNotificationRequest(
             identifier: identifier, content: content, trigger: nil)
         center.add(notification) { [log] error in
@@ -77,8 +83,29 @@ final class Notifier {
         }
     }
 
+    /// The shell backends speak `/System/Library/Sounds` vocabulary ("Glass",
+    /// "Ping"). UNNotificationSound resolves a custom name against the app
+    /// bundle instead, so scripts/build-agent.sh copies those .aiff files into
+    /// Contents/Resources and the extension is added back here. A name that did
+    /// not get bundled would resolve to nothing at all, so fall back to the
+    /// system default rather than posting silently.
+    private static func sound(named name: String) -> UNNotificationSound {
+        let file = name.hasSuffix(".aiff") ? name : name + ".aiff"
+        guard Bundle.main.url(forResource: file, withExtension: nil) != nil else {
+            return .default
+        }
+        return UNNotificationSound(named: UNNotificationSoundName(file))
+    }
+
+    /// Removes both delivered and still-pending notifications.
+    ///
+    /// Delivery through `center.add` is asynchronous, so a dismiss that arrives
+    /// in the same drain batch as its notify can reach the center first. Without
+    /// the pending removal that dismiss is a no-op and the banner appears
+    /// afterwards with nothing left tracking it.
     func withdraw(_ identifiers: [String]) {
         guard !identifiers.isEmpty else { return }
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
         center.removeDeliveredNotifications(withIdentifiers: identifiers)
         log("withdrew \(identifiers.joined(separator: ","))")
     }
