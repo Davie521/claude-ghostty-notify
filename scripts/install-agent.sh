@@ -97,13 +97,18 @@ if [[ "$(cat "$READY" 2>/dev/null)" != "authorized" ]]; then
         [[ -s "$READY" ]] && break
         sleep 1
     done
+    # Read the answer BEFORE stopping that instance: an orderly shutdown removes
+    # the readiness marker (it must not outlive the process it describes), so
+    # reading afterwards reports "no answer" for a grant that in fact succeeded.
+    ANSWER=$(cat "$READY" 2>/dev/null || true)
+
     # Stop the instance that was only here to answer the prompt. Leaving it
     # would make it the incumbent, and the singleton guard would then send
     # launchd's instance away — leaving launchd with nothing to restart if the
     # agent ever crashes.
     pkill -f "$BIN" 2>/dev/null || true
     sleep 1
-    case "$(cat "$READY" 2>/dev/null)" in
+    case "$ANSWER" in
         authorized) echo "    granted" ;;
         denied)
             echo "    DENIED — the agent cannot display notifications." >&2
@@ -119,6 +124,25 @@ launchctl bootstrap "$DOMAIN" "$PLIST"
 echo "==> Installed $LABEL"
 echo "    plist: $PLIST"
 echo "    stop:  bash scripts/install-agent.sh --uninstall"
+echo
+# The one setting the product needs and no code can set. macOS ignores
+# NSUserNotificationAlertStyle for UNUserNotificationCenter apps — verified with a
+# fresh bundle identifier carrying the key from first registration — and Apple has
+# said the style is not programmatically settable. So: detect it and walk the user
+# there, which is what other apps in this position do.
+STYLE_FILE="$HOME/.claude/notifications/ghostty-agent/alert-style"
+for _ in $(seq 1 15); do
+    [[ -s "$STYLE_FILE" ]] && break
+    sleep 1
+done
+if [[ "$(cat "$STYLE_FILE" 2>/dev/null)" == "banner" ]]; then
+    echo
+    echo "==> Notifications are set to Temporary, so they slide away in about five"
+    echo "    seconds — and clicking one is how you jump back to the session's tab."
+    echo "    Set Alert Style to Persistent in the window that just opened."
+    "$BIN" --send '{"type":"style_hint"}' 2>/dev/null || true
+fi
+
 echo
 echo "On first notification macOS will ask twice:"
 echo "  1. permission to send notifications"

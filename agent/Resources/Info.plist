@@ -37,15 +37,16 @@
     <true/>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
-    <!-- Ask for Alerts, not Banners. A banner slides away after a few seconds,
-         which leaves the user nothing to click — and clicking is how you jump to
-         the tab. This is the same reason the shell path prefers `alerter` over
-         terminal-notifier (see the comment in hooks/ghostty-notify.sh): alerter
-         is always alert-style. This key only sets the DEFAULT; once macOS has
-         recorded a style for the bundle, only System Settings › Notifications
-         changes it. -->
-    <key>NSUserNotificationAlertStyle</key>
-    <string>alert</string>
+    <!-- NSUserNotificationAlertStyle is deliberately absent. It only ever
+         affected the deprecated NSUserNotification API; for a
+         UNUserNotificationCenter app macOS ignores it and always records Banner.
+         Verified here with a fresh bundle identifier carrying the key from first
+         registration: the notification still slid away after a few seconds. An
+         Apple engineer has confirmed publicly that alert style can no longer be
+         set programmatically and is not expected to become settable again — only
+         built-in apps get Alerts by default. The agent detects the style at
+         launch instead and points the user at the exact System Settings pane; see
+         Agent.publishAlertStyle. Do not re-add this key. -->
     <!-- Required before macOS will even prompt for Automation. Without this key
          the first Apple Event to Ghostty is denied outright, and clicking a
          notification would silently fail to jump. -->

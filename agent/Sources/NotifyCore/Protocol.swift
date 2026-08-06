@@ -24,6 +24,10 @@ public enum AgentRequest: Equatable, Sendable {
     case anchor(sessionID: String, tabID: String?)
     /// Liveness probe used by the install script and the integration test.
     case ping
+    /// Show the alert-style guidance dialog even if it has been shown before.
+    /// Sent by the install script when macOS has this app on Temporary style,
+    /// which is the one thing the product needs that no code can set.
+    case styleHint
 }
 
 public struct NotifyRequest: Equatable, Sendable {
@@ -159,6 +163,8 @@ public enum RequestCodec {
             return .anchor(sessionID: try session(), tabID: optional("tab_id"))
         case "ping":
             return .ping
+        case "style_hint":
+            return .styleHint
         default:
             throw RequestDecodeError.unknownType(type)
         }
@@ -188,6 +194,8 @@ public enum RequestCodec {
             if let tabID { object["tab_id"] = tabID }
         case .ping:
             object = ["type": "ping"]
+        case .styleHint:
+            object = ["type": "style_hint"]
         }
         return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
     }

@@ -64,6 +64,27 @@ final class Notifier {
         }
     }
 
+    /// The style macOS has recorded for this app: `banner`, `alert` or `none`.
+    ///
+    /// Read-only by necessity. `NSUserNotificationAlertStyle` only ever applied
+    /// to the deprecated NSUserNotification API, and Apple has confirmed the
+    /// style cannot be set programmatically for UNUserNotificationCenter apps —
+    /// verified here by shipping a fresh bundle identifier that carried the key
+    /// from first registration and still got Banner. All an app can do is notice
+    /// and say so.
+    func currentAlertStyle(_ completion: @escaping @MainActor (String) -> Void) {
+        center.getNotificationSettings { settings in
+            let name: String
+            switch settings.alertStyle {
+            case .alert: name = "alert"
+            case .banner: name = "banner"
+            case .none: name = "none"
+            @unknown default: name = "unknown"
+            }
+            Task { @MainActor in completion(name) }
+        }
+    }
+
     func post(identifier: String, sessionID: String, request: NotifyRequest) {
         let content = UNMutableNotificationContent()
         content.title = request.title

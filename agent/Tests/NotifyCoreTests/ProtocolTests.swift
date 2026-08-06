@@ -95,6 +95,7 @@ struct RequestDecodingTests {
             try decode(#"{"type":"anchor","session_id":"abc"}"#)
                 == .anchor(sessionID: "abc", tabID: nil))
         #expect(try decode(#"{"type":"ping"}"#) == .ping)
+        #expect(try decode(#"{"type":"style_hint"}"#) == .styleHint)
     }
 
     // The hook passes the tab id ghostty-tab-save.sh resolved, which beats the
@@ -193,6 +194,7 @@ struct RequestDecodingTests {
             .anchor(sessionID: "abc", tabID: "TAB-1"),
             .anchor(sessionID: "abc", tabID: nil),
             .ping,
+            .styleHint,
         ]
         for request in cases {
             #expect(try RequestCodec.decode(RequestCodec.encode(request)) == request)

@@ -49,6 +49,16 @@ public struct AgentPaths: Equatable, Sendable {
     /// Holds `authorized` or `denied`. A hook that finds anything else must
     /// assume the agent cannot display a notification and use the shell path.
     public var readyFile: String { root + "/ready" }
+    /// Holds `banner`, `alert` or `none` — the notification style macOS has
+    /// recorded for this app. An app cannot set it (Apple removed that), so the
+    /// install script reads this to decide whether to send the user to System
+    /// Settings, where it is the difference between a notification you can click
+    /// and one that slides away before you can.
+    public var alertStyleFile: String { root + "/alert-style" }
+    /// Written once the style guidance has been shown, so a background agent
+    /// that restarts at every login does not put a dialog in the user's face
+    /// again and again.
+    public var styleHintShownFile: String { root + "/style-hint-shown" }
     public var log: String { root + "/agent.log" }
     /// Where ghostty-tab-save.sh records each session's resolved tab id.
     public func sessionTabFile(sessionID: String) -> String {

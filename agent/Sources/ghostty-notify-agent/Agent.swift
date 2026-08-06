@@ -49,7 +49,9 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             self.publishReadiness(granted)
             if !granted {
                 self.log("notifications are not authorized — see System Settings › Notifications")
+                return
             }
+            self.publishAlertStyle()
         }
 
         observeActivation()
@@ -139,6 +141,9 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         case .ping:
             log("pong")
+
+        case .styleHint:
+            offerStyleGuidance(force: true)
         }
     }
 
@@ -400,6 +405,60 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     private func writePidFile() {
         try? "\(getpid())\n".write(toFile: paths.pidFile, atomically: true, encoding: .utf8)
+    }
+
+    /// Record the notification style and, when it is Banner, say plainly what
+    /// that costs and how to change it.
+    ///
+    /// Banner notifications slide away after about five seconds. Clicking one is
+    /// how you jump to the session's tab, so on Banner the jump is only reachable
+    /// through Notification Center. No app can change this: Apple removed the
+    /// ability, and only built-in apps get Alerts by default. Detecting it and
+    /// pointing at the exact pane is the whole of what is available — which is
+    /// what other apps in this position do.
+    private func publishAlertStyle() {
+        notifier.currentAlertStyle { [weak self] style in
+            guard let self else { return }
+            try? (style + "\n").write(
+                toFile: self.paths.alertStyleFile, atomically: true, encoding: .utf8)
+            self.log("alert style = \(style)")
+            guard style == "banner" else { return }
+            self.log(
+                "temporary style: notifications slide away after a few seconds, so "
+                    + "click-to-jump is only reachable from Notification Center. Fix at "
+                    + "System Settings › Notifications › \(Self.appName) › Alert Style › "
+                    + "Persistent  (deep link: \(Self.notificationSettingsURL))")
+            self.offerStyleGuidance(force: false)
+        }
+    }
+
+    /// One-time guidance walking the user to the setting.
+    ///
+    /// A log line is not guidance for something the product does not work
+    /// properly without, and this cannot be fixed in code — so the app has to
+    /// ask. Shown at most once unless `force` (a `style_hint` request), because a
+    /// login-launched background agent nagging on every restart would be worse
+    /// than the problem.
+    ///
+    /// Deliberately a non-modal window: see StyleHintWindow for what an
+    /// NSAlert.runModal() did to the rest of the agent.
+    func offerStyleGuidance(force: Bool) {
+        let marker = paths.styleHintShownFile
+        if !force, FileManager.default.fileExists(atPath: marker) { return }
+        try? "shown\n".write(toFile: marker, atomically: true, encoding: .utf8)
+
+        StyleHintWindow.show(
+            settingsURL: Self.notificationSettingsURL,
+            appName: Self.appName,
+            log: { [weak self] in self?.log($0) }
+        )
+    }
+
+    private static let appName = "Claude Ghostty Notify"
+    /// Opens System Settings straight at this app's own notification pane.
+    static var notificationSettingsURL: String {
+        let bundleID = Bundle.main.bundleIdentifier ?? ""
+        return "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleID)"
     }
 
     private func publishReadiness(_ granted: Bool) {
