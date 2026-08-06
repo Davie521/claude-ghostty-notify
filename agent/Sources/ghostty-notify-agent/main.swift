@@ -26,6 +26,14 @@ if arguments.count >= 2, arguments[1] == "--send" {
     exit(SpoolWriter.write(json: arguments[2], to: paths.spool) ? 0 : 1)
 }
 
+// One agent per machine. See Singleton for why two are easy to get and what
+// they break. Checked here, before NSApplication exists, so nothing from
+// UserNotifications is touched on a launch that is about to bail out.
+if let incumbent = Singleton.incumbent(paths: paths) {
+    AgentLog.append("another agent is already running as \(incumbent); exiting", to: paths.log)
+    exit(0)
+}
+
 // SIGTERM keeps its default disposition on purpose: launchd stops the agent that
 // way, and there is nothing to flush that saveState has not already written.
 let application = NSApplication.shared

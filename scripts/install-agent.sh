@@ -64,8 +64,14 @@ cat > "$PLIST" <<PLIST_EOF
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!-- Restart on a crash, but NOT on a clean exit. A second agent exits 0 on
+         purpose when one is already running (see Singleton.swift); with
+         KeepAlive=true launchd would restart it immediately and spin. -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
     <key>ProcessType</key>
     <string>Interactive</string>
 </dict>
@@ -91,6 +97,12 @@ if [[ "$(cat "$READY" 2>/dev/null)" != "authorized" ]]; then
         [[ -s "$READY" ]] && break
         sleep 1
     done
+    # Stop the instance that was only here to answer the prompt. Leaving it
+    # would make it the incumbent, and the singleton guard would then send
+    # launchd's instance away — leaving launchd with nothing to restart if the
+    # agent ever crashes.
+    pkill -f "$BIN" 2>/dev/null || true
+    sleep 1
     case "$(cat "$READY" 2>/dev/null)" in
         authorized) echo "    granted" ;;
         denied)

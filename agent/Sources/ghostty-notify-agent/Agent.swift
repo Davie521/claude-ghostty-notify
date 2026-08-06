@@ -17,6 +17,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     private var spool: SpoolWatcher?
     private var pruneTimer: DispatchSourceTimer?
     private var activationObserver: NSObjectProtocol?
+    private var terminationSource: DispatchSourceSignal?
     /// Per-identifier expiry timers, so a replacement notification restarts the
     /// clock instead of inheriting the old one's deadline.
     private var expiryTimers: [String: DispatchSourceTimer] = [:]
@@ -53,6 +54,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         observeActivation()
         startPruning()
+        handleTermination()
 
         let watcher = SpoolWatcher(
             directory: paths.spool,
@@ -61,6 +63,26 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         )
         watcher.start()
         spool = watcher
+    }
+
+    /// Turn SIGTERM into an orderly shutdown.
+    ///
+    /// launchd stops the agent with SIGTERM, and the default disposition kills
+    /// the process outright — `applicationWillTerminate` never runs, so the
+    /// pidfile and the readiness marker are left claiming a live, authorized
+    /// agent. `agent_ready` in the hooks checks the process too, so nothing
+    /// misroutes because of it, but a liveness marker that outlives the process
+    /// it describes is a trap for the next reader.
+    private func handleTermination() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            MainActor.assumeIsolated {
+                NSApp.terminate(nil)
+            }
+        }
+        source.resume()
+        terminationSource = source
     }
 
     func applicationWillTerminate(_ notification: Notification) {
