@@ -311,6 +311,14 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         if tabID == nil, let sessionID {
             tabID = Agent.persistedTabID(paths: paths, sessionID: sessionID)
         }
+        // Claim the activation the click just handed us before trying to move
+        // another app's windows. macOS only lets the active application hand
+        // activation on; from the background both the Apple Event and
+        // NSRunningApplication requests are dropped, which is exactly how a
+        // click could report success and yet leave Ghostty behind whatever the
+        // user was actually looking at.
+        NSApp.activate(ignoringOtherApps: true)
+
         guard let tabID else {
             // No tab was ever resolved (tmux, unscriptable Ghostty). Front the
             // app so the user is one keystroke away instead of nowhere.
@@ -318,13 +326,21 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             Ghostty.activate()
             return
         }
-        Ghostty.focus(tabID: tabID) { [weak self] ok in
+        // Select the tab first, then bring the app forward — so what appears is
+        // already the right tab rather than whatever was last in front.
+        Ghostty.focus(tabID: tabID) { [weak self] selected in
             guard let self else { return }
-            if ok {
-                self.log("jump: focused \(tabID)")
-            } else {
-                self.log("jump: \(tabID) is gone, activating Ghostty")
-                Ghostty.activate()
+            Ghostty.activate()
+            switch selected {
+            case nil:
+                self.log("jump: \(tabID) not found, activated Ghostty only")
+            case tabID:
+                self.log("jump: focused \(tabID), verified selected")
+            case .some(let other):
+                // Selecting reported success but the selection did not stick.
+                // Worth its own line: it is the difference between "we asked"
+                // and "it happened", and the two look identical from outside.
+                self.log("jump: asked for \(tabID) but \(other) is selected")
             }
         }
     }

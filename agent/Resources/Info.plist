@@ -5,9 +5,21 @@
     <key>CFBundleName</key>
     <string>Claude Ghostty Notify</string>
     <!-- Notification authorization and the Automation grant are both keyed to
-         this identifier. Changing it re-prompts the user for both. -->
+         this identifier. Changing it re-prompts the user for both.
+         An identifier can also be BURNED: if the process ever touches
+         UNUserNotificationCenter.current() before the app finishes launching,
+         macOS answers every later authorization request for that identifier with
+         "Notifications are not allowed for this application" — no dialog, and no
+         entry in System Settings to flip. That state survives rebuilds, moving
+         the bundle, re-signing, and restarting usernoted; the only way out is a
+         new identifier. See the comment on Notifier.center, which is what keeps
+         it from happening.
+         Clicking "Don't Allow" burns an identifier the same permanent way, and
+         also leaves no System Settings entry — so an identifier gets exactly one
+         chance. Both failure modes were hit while bringing this up, which is why
+         this is the third identifier the agent has had. -->
     <key>CFBundleIdentifier</key>
-    <string>io.github.davie521.claude-ghostty-notify</string>
+    <string>io.github.davie521.cgnotify</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
@@ -25,6 +37,15 @@
     <true/>
     <key>LSMinimumSystemVersion</key>
     <string>13.0</string>
+    <!-- Ask for Alerts, not Banners. A banner slides away after a few seconds,
+         which leaves the user nothing to click — and clicking is how you jump to
+         the tab. This is the same reason the shell path prefers `alerter` over
+         terminal-notifier (see the comment in hooks/ghostty-notify.sh): alerter
+         is always alert-style. This key only sets the DEFAULT; once macOS has
+         recorded a style for the bundle, only System Settings › Notifications
+         changes it. -->
+    <key>NSUserNotificationAlertStyle</key>
+    <string>alert</string>
     <!-- Required before macOS will even prompt for Automation. Without this key
          the first Apple Event to Ghostty is denied outright, and clicking a
          notification would silently fail to jump. -->

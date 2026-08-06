@@ -115,7 +115,7 @@ AGENT_PID=$!
 check "agent starts and writes a pidfile" \
     wait_for 15 test -f "$ROOT/agent.pid"
 check "agent logs its bundle identity (proves it is bundled, not a bare binary)" \
-    wait_for 15 log_has "bundle=io.github.davie521.claude-ghostty-notify"
+    wait_for 15 log_has "bundle=io.github.davie521.cgnotify"
 
 # Everything below is meaningless if the agent is not actually draining, so
 # establish that first with a request whose only effect is a log line.

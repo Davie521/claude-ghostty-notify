@@ -12,7 +12,17 @@ import UserNotifications
 /// real .app under the plugin root; see scripts/build-agent.sh.
 @MainActor
 final class Notifier {
-    private let center = UNUserNotificationCenter.current()
+    /// Resolved on each use, never stored at init.
+    ///
+    /// `UNUserNotificationCenter.current()` must not be touched before the app
+    /// has finished launching. This class is constructed from `main.swift`,
+    /// before `NSApplication.run()`, and a stored property would make that first
+    /// touch happen there — at which point the notification system has not
+    /// registered the bundle yet and permanently answers every authorization
+    /// request with "Notifications are not allowed for this application", with
+    /// no dialog and no entry in System Settings. It is a singleton, so
+    /// re-resolving costs nothing.
+    private var center: UNUserNotificationCenter { UNUserNotificationCenter.current() }
     /// Sendable because the notification center's completion handlers run off
     /// the main thread and still need to report failures.
     private let log: @Sendable (String) -> Void

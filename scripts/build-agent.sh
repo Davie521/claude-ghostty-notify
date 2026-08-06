@@ -35,7 +35,7 @@ BUILT=$(swift build -c release --package-path "$REPO/agent" --show-bin-path)/"$B
 # check then confirms that stale process as healthy — so `open -a` never starts
 # the rebuilt bundle and every fix in this build stays inert until logout.
 echo "==> Stopping any running agent"
-LABEL="io.github.davie521.claude-ghostty-notify"
+LABEL="io.github.davie521.cgnotify"
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 pkill -f "$APP/Contents/MacOS/$BINARY_NAME" 2>/dev/null || true
 # The pidfile has to go too: agent_running reads it, and a pid that has been

@@ -20,7 +20,7 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$HERE/.." && pwd)
 
-LABEL="io.github.davie521.claude-ghostty-notify"
+LABEL="io.github.davie521.cgnotify"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 APP="$REPO/build/ClaudeGhosttyNotify.app"
 BIN="$APP/Contents/MacOS/ghostty-notify-agent"
@@ -71,6 +71,35 @@ cat > "$PLIST" <<PLIST_EOF
 </dict>
 </plist>
 PLIST_EOF
+
+# Obtain the notification grant BEFORE handing the agent to launchd.
+#
+# An agent launchd starts by exec'ing the binary directly does not get served by
+# the notification system — every authorization request comes back
+# "Notifications are not allowed for this application", and because a refusal is
+# permanent per bundle identifier, that one attempt burns the identifier for
+# good. Launching through `open` (i.e. through LaunchServices) does prompt
+# normally. So: prompt once here, wait for the answer, and only then install the
+# LaunchAgent, which from then on merely restarts an already-authorized app.
+READY="$HOME/.claude/notifications/ghostty-agent/ready"
+if [[ "$(cat "$READY" 2>/dev/null)" != "authorized" ]]; then
+    echo "==> Requesting notification permission (a dialog will appear)"
+    echo "    Click Allow. Clicking Don't Allow permanently disables this build's"
+    echo "    identifier — macOS leaves no System Settings entry to undo it."
+    open -a "$APP"
+    for _ in $(seq 1 120); do
+        [[ -s "$READY" ]] && break
+        sleep 1
+    done
+    case "$(cat "$READY" 2>/dev/null)" in
+        authorized) echo "    granted" ;;
+        denied)
+            echo "    DENIED — the agent cannot display notifications." >&2
+            echo "    Hooks will keep using the alerter/terminal-notifier path." >&2
+            ;;
+        *) echo "    no answer yet; the agent will keep running and can be re-asked" >&2 ;;
+    esac
+fi
 
 unload
 launchctl bootstrap "$DOMAIN" "$PLIST"

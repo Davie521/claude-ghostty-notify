@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import NotifyCore
 
 /// Apple Events to Ghostty, sent in-process — no `osascript` fork, which is the
 /// whole reason the polling loop moved into a resident app.
@@ -42,27 +44,38 @@ enum Ghostty {
     /// `activate window` is required before `select tab`: selecting alone puts
     /// the tab in front *inside a background window*, and the user sees nothing
     /// change. Learned by ghostty-tab-focus.sh the hard way.
-    static func focus(tabID: String, _ completion: @escaping @MainActor (Bool) -> Void) {
+    /// Selects `tabID` and reports which tab is selected afterwards.
+    ///
+    /// Returning the resulting selection rather than a bare "ok" is deliberate:
+    /// the script can succeed while the selection does not stick, and a boolean
+    /// cannot tell those apart. It also makes the log self-verifying, which
+    /// matters because reading the selection from a separate process a moment
+    /// later races the user's own tab switching.
+    static func focus(tabID: String, _ completion: @escaping @MainActor (String?) -> Void) {
         // The id comes from persisted state and is interpolated into script
         // source, so a crafted value could otherwise smuggle in `do shell
         // script`. Whitelist first, then escape — either alone would do, but
         // this is the one place where being wrong runs arbitrary code.
         guard isPlausibleTabID(tabID) else {
-            Task { @MainActor in completion(false) }
+            Task { @MainActor in completion(nil) }
             return
         }
         let literal = appleScriptLiteral(tabID)
+        // No `activate` here. An Apple Event asking another app to come forward
+        // is silently ignored when the sender is not the active app, so it
+        // reported success while nothing moved. App-level activation is done by
+        // the caller through NSRunningApplication instead; this script only has
+        // to put the right tab in front inside Ghostty.
         run(
             """
             tell application "Ghostty"
-                activate
                 repeat with w in every window
                     repeat with t in every tab of w
                         try
                             if (id of t as text) is \(literal) then
                                 activate window w
                                 select tab t
-                                return "ok"
+                                return (id of selected tab of w as text)
                             end if
                         end try
                     end repeat
@@ -70,20 +83,34 @@ enum Ghostty {
                 return ""
             end tell
             """
-        ) { completion($0 == "ok") }
+        ) { completion($0) }
     }
 
     /// Degraded fallback for a click we cannot localize: at least put Ghostty in
     /// front so the user is one keystroke from their session.
+    @MainActor
     static func activate() {
-        run(#"tell application "Ghostty" to activate"#) { _ in }
+        // NSRunningApplication, not an Apple Event: `tell application … to
+        // activate` sent from a background process is dropped without an error,
+        // which is what made a notification click select the right tab inside a
+        // window that never came to the front.
+        let running = NSRunningApplication.runningApplications(
+            withBundleIdentifier: AgentConstants.ghosttyBundleID)
+        running.first?.activate(options: [.activateAllWindows])
     }
 
-    /// Ghostty hands out UUID-shaped ids. Anything else is either not from
-    /// Ghostty or is an attempt to inject script source.
+    /// Shape check on a tab id before it is interpolated into script source.
+    ///
+    /// Ghostty's ids are not UUIDs — a real one looks like `tab-cb7cc1a00`. An
+    /// earlier version of this only allowed hex digits and dashes, which
+    /// rejected every genuine id (`t` is not hex) and silently disabled both
+    /// withdrawal-by-tab and click-to-jump. So: alphanumerics, dash and
+    /// underscore, with a length cap. That admits no quote, no backslash, no
+    /// newline and no space, which is what keeps `do shell script` out; the
+    /// escaping in appleScriptLiteral is the second layer.
     static func isPlausibleTabID(_ id: String) -> Bool {
         !id.isEmpty && id.count <= 128
-            && id.allSatisfy { $0.isHexDigit || $0 == "-" }
+            && id.allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber || $0 == "-" || $0 == "_") }
     }
 
     static func appleScriptLiteral(_ value: String) -> String {
