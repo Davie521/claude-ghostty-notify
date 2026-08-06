@@ -43,7 +43,25 @@ fi
 SANDBOX=$(mktemp -d)
 AGENT_PID=""
 cleanup() {
-    [[ -n "$AGENT_PID" ]] && kill "$AGENT_PID" 2>/dev/null
+    # Withdraw what this run posted BEFORE stopping the agent. Notification
+    # Center is scoped to the bundle identifier, not to HOME — so a sandboxed
+    # HOME does not stop these notifications from landing in the real user's
+    # Notification Center and sitting there afterwards. Observed for real: a
+    # previous run's synthetic session ids turned up in a later click.
+    # Defensive: the trap is installed before the session ids and the helpers
+    # exist, and an early failure must not turn into an unbound-variable error
+    # inside cleanup.
+    if [[ -n "$AGENT_PID" ]] && kill -0 "$AGENT_PID" 2>/dev/null &&
+        command -v agent_queue >/dev/null 2>&1; then
+        for sid in "${SID:-}" "${OTHER:-}"; do
+            [[ -n "$sid" ]] || continue
+            agent_queue "$(jq -nc --arg s "$sid" '{type:"dismiss",session_id:$s}')" "$APP" \
+                2>/dev/null || true
+        done
+        # Give the watcher a moment to drain before the process goes away.
+        sleep 1
+        kill "$AGENT_PID" 2>/dev/null
+    fi
     rm -rf "$SANDBOX"
 }
 trap cleanup EXIT
