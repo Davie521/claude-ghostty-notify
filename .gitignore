@@ -10,3 +10,7 @@
 agent/.build/
 build/
 hooks/bin/
+
+# Playwright MCP page snapshots — browser scratch output, not project source.
+# Swept into a commit once by `git add -A`; kept out of the index since.
+.playwright-mcp/
