@@ -49,22 +49,10 @@ jobs:
           bash tests/test-session-title.sh
           bash tests/test-clear-on-focus.sh
 
-      # The native watcher is optional at runtime — every step above pins the
-      # bash path, so a Swift failure here can never mask a shell regression.
+      # The resident agent is optional at runtime — every step above pins the
+      # shell path, so a Swift failure here can never mask a shell regression.
       - name: Swift toolchain
         run: swift --version
-
-      - name: Build native watcher
-        # -c release is required: tests/test-swift-watcher.sh resolves the
-        # binary under .build/release, and --package-path is required because
-        # the package lives in a subdirectory.
-        run: swift build -c release --package-path watcher
-
-      - name: WatcherCore unit tests
-        run: swift test --package-path watcher
-
-      - name: Native watcher integration test
-        run: bash tests/test-swift-watcher.sh
 
       - name: NotifyCore unit tests
         run: swift test --package-path agent

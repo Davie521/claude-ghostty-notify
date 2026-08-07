@@ -163,22 +163,15 @@ if [[ "$MODE" == "clear" ]]; then
 fi
 
 # ── Watch mode ─────────────────────────────────────────────────────────────
-# Optional native watcher. It runs the same state machine on the same poll
-# cadence, but reads the frontmost app in-process instead of spawning two
-# lsappinfo per tick — so waiting for a notification with Ghostty in the
-# background costs no process spawns at all. It is built locally
-# (scripts/build-watcher.sh) and never shipped, so a missing binary just
-# leaves the bash loop in charge.
+# This loop is now the FALLBACK path. When the resident agent is installed and
+# authorized, ghostty-notify.sh routes delivery to it and never spawns this
+# watcher — the agent withdraws on a NSWorkspace activation event instead of
+# waking once a second, and one process serves every session. This stays for
+# machines without the agent: no Swift toolchain, permission declined, or the
+# user pinning the shell path with GHOSTTY_NOTIFY_AGENT_APP="".
 #
-# `exec` keeps the PID, so ghostty-notify.sh's spawn and the pidfile
-# bookkeeping around it are unaffected, and the session id stays in argv so
-# kill_if_matches still recognizes the process. `${VAR-default}` is `-`, not
-# `:-`: exporting GHOSTTY_NOTIFY_WATCHER_BIN="" explicitly pins the bash path
-# (the regression tests rely on that), while leaving it unset picks the
-# sibling build.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
-WATCHER_BIN="${GHOSTTY_NOTIFY_WATCHER_BIN-$SCRIPT_DIR/bin/ghostty-notify-clear-watcher}"
-[[ -n "$WATCHER_BIN" && -x "$WATCHER_BIN" ]] && exec "$WATCHER_BIN" "$SESSION_ID"
+# (An earlier step replaced this loop with a per-notification Swift binary. The
+# resident agent subsumed it, so that binary is gone rather than left to rot.)
 
 # Singleton per session: a newer notification round's watcher supersedes a
 # live one (the new alert replaced the old on screen — same group ID).

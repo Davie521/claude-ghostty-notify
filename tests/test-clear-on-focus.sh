@@ -130,13 +130,10 @@ export GHOSTTY_NOTIFY_SOUND_ELAPSED=9999
 export GHOSTTY_NOTIFY_TIMEOUT=20
 export GHOSTTY_NOTIFY_BACKEND=auto
 export GHOSTTY_NOTIFY_FOCUS_POLL=0.2
-# Pin the bash watcher. This file is the regression guard for the shell
-# implementation, so it must never hand off to a locally built native watcher
-# (tests/test-swift-watcher.sh covers that path). The empty value relies on
-# the hand-off using `${VAR-default}`, not `${VAR:-default}`.
-export GHOSTTY_NOTIFY_WATCHER_BIN=""
-# Same reasoning for the resident agent: it withdraws notifications from its own
-# process, so the shell clear-on-focus loop under test here would never run.
+# This file is the regression guard for the SHELL clear-on-focus loop, so the
+# resident agent must never intercept: it withdraws notifications from its own
+# process and the loop under test here would never run. The empty value relies
+# on agent_app using `${VAR-default}`, not `${VAR:-default}`.
 export GHOSTTY_NOTIFY_AGENT_APP=""
 unset GHOSTTY_RESOURCES_DIR || true
 unset GHOSTTY_NOTIFY_CLEAR_ON_FOCUS || true
