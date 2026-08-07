@@ -1,7 +1,7 @@
 {
   "name": "claude-ghostty-notify",
-  "version": "0.3.0",
-  "description": "Ghostty-native notifications for Claude Code: time-tiered alerts (silent under 3min, no-sound 3-10min, with sound over 10min) and click-to-jump tab focus",
+  "version": "0.4.0",
+  "description": "Ghostty-native notifications for Claude Code: time-tiered alerts (silent under 3min, no-sound 3-10min, with sound over 10min), click-to-jump tab focus, and an optional resident agent that clears the notification the moment you return to the session's tab",
   "author": {
     "name": "Davie521",
     "url": "https://github.com/Davie521"
