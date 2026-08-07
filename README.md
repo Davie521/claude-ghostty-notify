@@ -239,6 +239,8 @@ Mostly historical. `alerter` blocks until you click an action, it times out (`GH
 
 **`ghostty-tab-focus.sh` (on click):** activates Ghostty, reads `tab_id` from the session file, and uses Ghostty's native AppleScript `select tab` command — a real verb in the sdef, not a property write, so no accessibility permission is needed.
 
+**With the [native agent](#5-optional-the-native-agent) installed,** the last three of those collapse into one resident process. `ghostty-notify.sh` still decides *whether* and *what* to notify, then hands the request to the agent through a spool directory (one JSON file per request, published by rename) instead of firing `alerter`. The agent posts through `UNUserNotificationCenter`, withdraws on a `NSWorkspace` activation event rather than a poll, and answers clicks itself — so no watcher is spawned, nothing wakes on a timer, and `ghostty-notify-clear.sh` never runs. The agent refuses the request when macOS has not authorized it, which is what sends the hook back to `alerter` rather than dropping the notification silently.
+
 ### Design notes
 
 - **Why `session_id` and not `$PPID`?** Claude Code spawns intermediate shells with non-deterministic PIDs between hook invocations. `session_id` (from hook stdin JSON) is stable across the whole conversation, including `--resume`.
@@ -258,7 +260,9 @@ rm -f ~/.claude/hooks/ghostty-tab-save.sh \
       ~/.claude/hooks/ghostty-tab-focus.sh \
       ~/.claude/hooks/ghostty-notify.sh \
       ~/.claude/hooks/ghostty-round-reset.sh \
-      ~/.claude/hooks/ghostty-notify-clear.sh
+      ~/.claude/hooks/ghostty-notify-clear.sh \
+      ~/.claude/hooks/ghostty-agent-anchor.sh \
+      ~/.claude/hooks/agent-common.sh
 rm -rf ~/.claude/notifications/ghostty-sessions
 rm -f ~/.claude/notifications/state/ghostty-notify-*
 ```

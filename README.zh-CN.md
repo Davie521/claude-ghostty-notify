@@ -83,13 +83,34 @@ hook 通过插件 manifest 自动注册 —— **不需要手动改 `settings.js
 
 ### 3. 一个 macOS 系统设置
 
-**系统设置 → 通知 → 提醒样式 → 提醒 (Persistent)**,**Script Editor 和 Terminal 两个条目都设**(机器上有哪个设哪个)。
+**系统设置 → 通知 → 提醒样式 → 提醒 (Persistent)**,**Script Editor 和 Terminal 两个条目都设**(机器上有哪个设哪个)。装了[原生 agent](#5-可选原生-agent) 之后要设的是 **Claude Ghostty Notify** 这个条目 —— agent 会自己检测到设错并弹窗带你去那一页。
 
 > 通知挂在哪个 bundle 下取决于 alerter 版本:老版 alerter(≤1.x,ObjC)借用 Script Editor 的 bundle,而 alerter 26.x(Swift 重写版)默认是 `com.apple.Terminal`(它的 `--help` 写着 `--sender ... (default: com.apple.Terminal)`)。两个都设没有副作用,能覆盖任一版本。**提醒 (Persistent)** 样式会让通知留在屏幕上、直接显示 **Go to tab** 按钮;**横幅 (Banner)** 样式一闪即逝,按钮藏在 "Show" 折叠菜单里,点击不稳定。
 
 ### 4. 重启 Claude Code
 
 退出再打开,新 hook 才会被加载。默认阈值(3 分钟 / 10 分钟 / 20 分钟超时)开箱即用,想调见 [配置](#配置)。
+
+### 5. 可选:原生 agent
+
+上面几步已经能用。agent 把投递换成一个常驻 app,同时开好几个 session 的话值得装:
+
+```bash
+bash scripts/build-agent.sh     # 需要 Swift 工具链(xcode-select --install)
+bash scripts/install-agent.sh   # 编译 LaunchAgent 并申请权限
+```
+
+区别:
+
+- **一个进程,而不是每条通知一个。** shell 路径每弹一条通知就派一个 watcher,每秒醒一次直到你回来;agent 订阅 app 激活事件,两条通知之间什么都不做。
+- **精确撤回。** 它经 `UNUserNotificationCenter` 发送、按 identifier 撤回,所以同一 session 的新通知会**替换**旧的而不是堆叠。
+- **菜单栏图标**,显示是否已授权、macOS 给它的提醒样式是哪种、有几条通知待处理 —— 否则一个显示不出任何东西的后台进程,和一个正常工作的长得一模一样。
+
+安装时会要两个权限,都是一次性的:通知、以及控制 Ghostty(点击跳转要用)。两个都要允许。
+
+> **通知权限那个一定要点「允许」。** 点「不允许」对该构建是**永久**的 —— macOS 不会在系统设置里留下开关可以撤销,唯一的出路是换一个 bundle identifier。
+
+卸载:`bash scripts/install-agent.sh --uninstall`,hook 会自动回落到 shell 路径。
 
 ### 手动安装(不用插件系统)
 
@@ -113,7 +134,9 @@ cd claude-ghostty-notify
 | `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto`(先 alerter,没有再 fallback 到 terminal-notifier)/ `terminal-notifier`(强制)。alerter 弹不出通知时设成 `terminal-notifier` —— 见排查那节。terminal-notifier 后端不接点击跳转(它的 `-execute` 连 dismiss 都会触发);强制 alerter 但二进制缺失时会降级到 terminal-notifier,而不是静默吞掉通知 |
 | `GHOSTTY_NOTIFY_ON_PROMPT`     | `0`    | 设成 `1` 后,`Notification` 事件(权限/输入提示)也会立即弹通知 + Ping 音。不跑 bypass-permissions 模式的话推荐打开 |
 | `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS` | `1`   | 聚焦到会话所在 tab 时自动清除通知,在该会话提交新 prompt 时同样清除。tab 未知时(tmux、Ghostty 不可脚本化)降级为「Ghostty 重新回到前台时清除」。用 `0`/`false`/`no`/`off` 关闭;其他值一律视为开启 |
-| `GHOSTTY_NOTIFY_FOCUS_POLL`    | `1`    | 聚焦检测的轮询间隔(秒,可用小数)。`0` 会让 watcher 空转,因此回落到默认值 |
+| `GHOSTTY_NOTIFY_FOCUS_POLL`    | `1`    | 聚焦检测的轮询间隔(秒,可用小数)。`0` 会让 watcher 空转,因此回落到默认值。走 agent 投递时无意义 —— 它没有轮询 |
+| `GHOSTTY_NOTIFY_AGENT_APP`     | *(自动发现)* | agent bundle 的路径。设成**空字符串**可以钉住 shell 路径、无视已安装的 agent;不设则「有就用」;指向一个不是可执行 bundle 的路径会被拒绝而不是盲信 |
+| `GHOSTTY_NOTIFY_MENU_BAR`      | `1`    | agent 的菜单栏图标。`0`/`false`/`no`/`off` 隐藏 —— 代价是失去「agent 还活着且有权限」的唯一可见凭据 |
 
 值必须是纯整数(秒),否则回落到默认值(`GHOSTTY_NOTIFY_FOCUS_POLL` 可用小数)。
 
@@ -204,6 +227,8 @@ cd claude-ghostty-notify
 
 **`ghostty-tab-focus.sh`(点击时):** 激活 Ghostty,从 session 文件读 `tab_id`,用 Ghostty 原生 AppleScript `select tab` 命令切过去 —— 这是 sdef 里真实的 command(不是属性写入),所以**不需要辅助功能权限**。
 
+**装了[原生 agent](#5-可选原生-agent) 之后,** 上面最后三块会合并进一个常驻进程。`ghostty-notify.sh` 仍然负责判断**要不要发、发什么**,然后把请求经 spool 目录(一个请求一个 JSON 文件,靠 rename 发布)交给 agent,而不是去调 `alerter`。agent 经 `UNUserNotificationCenter` 发送,靠 `NSWorkspace` 激活事件撤回(不是轮询),点击也由它自己处理 —— 所以不再派 watcher、没有任何东西按秒醒来、`ghostty-notify-clear.sh` 完全不会跑。macOS 没给 agent 授权时它会**拒收**请求,这正是让 hook 退回 `alerter` 而不是静默丢掉通知的机制。
+
 ### 设计决策说明
 
 - **为什么用 `session_id` 而不是 `$PPID`?** Claude Code 每次 hook 触发会 fork 中间 shell,PID 不固定。`session_id`(从 hook stdin JSON 读)在整个会话(含 `--resume` 后)都稳定。
@@ -214,6 +239,8 @@ cd claude-ghostty-notify
 
 **插件方式:** `/plugin uninstall claude-ghostty-notify` —— hook 自动注销。
 
+**原生 agent**(如果装了):`bash scripts/install-agent.sh --uninstall`,然后 `rm -rf ~/.claude/notifications/ghostty-agent`。撤销它的通知权限是另一件事,要去系统设置 → 通知里做。
+
 **手动安装:**
 
 ```bash
@@ -221,7 +248,9 @@ rm -f ~/.claude/hooks/ghostty-tab-save.sh \
       ~/.claude/hooks/ghostty-tab-focus.sh \
       ~/.claude/hooks/ghostty-notify.sh \
       ~/.claude/hooks/ghostty-round-reset.sh \
-      ~/.claude/hooks/ghostty-notify-clear.sh
+      ~/.claude/hooks/ghostty-notify-clear.sh \
+      ~/.claude/hooks/ghostty-agent-anchor.sh \
+      ~/.claude/hooks/agent-common.sh
 rm -rf ~/.claude/notifications/ghostty-sessions
 rm -f ~/.claude/notifications/state/ghostty-notify-*
 ```

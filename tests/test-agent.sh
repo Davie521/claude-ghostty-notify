@@ -61,6 +61,15 @@ cleanup() {
         # Give the watcher a moment to drain before the process goes away.
         sleep 1
         kill "$AGENT_PID" 2>/dev/null
+        # And wait for it to actually exit. SIGTERM is handled: the agent saves
+        # state and removes its liveness markers on the way out, which refills
+        # the sandbox between readdir and rmdir if we delete it too early —
+        # observed as an intermittent "rm: Directory not empty".
+        local i=0
+        while (( i < 50 )) && kill -0 "$AGENT_PID" 2>/dev/null; do
+            sleep 0.1
+            i=$((i + 1))
+        done
     fi
     rm -rf "$SANDBOX"
 }
