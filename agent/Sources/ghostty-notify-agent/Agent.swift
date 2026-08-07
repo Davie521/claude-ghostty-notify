@@ -18,6 +18,9 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     private var pruneTimer: DispatchSourceTimer?
     private var activationObserver: NSObjectProtocol?
     private var terminationSource: DispatchSourceSignal?
+    private var menuBar: MenuBar?
+    private var authorized = false
+    private var alertStyle = ""
     /// Per-identifier expiry timers, so a replacement notification restarts the
     /// clock instead of inheriting the old one's deadline.
     private var expiryTimers: [String: DispatchSourceTimer] = [:]
@@ -42,6 +45,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         notifier.registerCategories()
         notifier.requestAuthorization { [weak self] granted in
             guard let self else { return }
+            self.authorized = granted
             self.log("authorization granted=\(granted)")
             // Publish the answer: until this file says "authorized", the hooks
             // must not treat a spooled request as a delivered notification, or a
@@ -57,6 +61,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         observeActivation()
         startPruning()
         handleTermination()
+        installMenuBar()
 
         let watcher = SpoolWatcher(
             directory: paths.spool,
@@ -419,6 +424,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     private func publishAlertStyle() {
         notifier.currentAlertStyle { [weak self] style in
             guard let self else { return }
+            self.alertStyle = style
             try? (style + "\n").write(
                 toFile: self.paths.alertStyleFile, atomically: true, encoding: .utf8)
             self.log("alert style = \(style)")
@@ -451,6 +457,43 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             settingsURL: Self.notificationSettingsURL,
             appName: Self.appName,
             log: { [weak self] in self?.log($0) }
+        )
+    }
+
+    /// The only always-visible surface the agent has. Without it, "running and
+    /// working" and "running but unable to display anything" look identical from
+    /// outside — which is the state an unanswered permission prompt or the
+    /// Temporary alert style leaves it in.
+    private func installMenuBar() {
+        guard MenuBar.isEnabled(env: ProcessInfo.processInfo.environment) else {
+            log("menu bar item disabled by GHOSTTY_NOTIFY_MENU_BAR")
+            return
+        }
+        menuBar = MenuBar(
+            status: { [weak self] in
+                guard let self else {
+                    return AgentStatus(
+                        authorized: false, alertStyle: "", outstandingNotifications: 0,
+                        trackedSessions: 0)
+                }
+                return AgentStatus(
+                    authorized: self.authorized,
+                    alertStyle: self.alertStyle,
+                    outstandingNotifications: self.state.sessions.values
+                        .reduce(0) { $0 + $1.notificationIDs.count },
+                    trackedSessions: self.state.sessions.count
+                )
+            },
+            onShowGuidance: { [weak self] in self?.offerStyleGuidance(force: true) },
+            onOpenSettings: { [weak self] in
+                guard let url = URL(string: Agent.notificationSettingsURL) else { return }
+                NSWorkspace.shared.open(url)
+                self?.log("menu: opened notification settings")
+            },
+            onOpenLog: { [weak self] in
+                guard let self else { return }
+                NSWorkspace.shared.open(URL(fileURLWithPath: self.paths.log))
+            }
         )
     }
 
