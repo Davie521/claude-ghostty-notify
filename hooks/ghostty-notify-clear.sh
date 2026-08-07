@@ -163,6 +163,16 @@ if [[ "$MODE" == "clear" ]]; then
 fi
 
 # ── Watch mode ─────────────────────────────────────────────────────────────
+# This loop is now the FALLBACK path. When the resident agent is installed and
+# authorized, ghostty-notify.sh routes delivery to it and never spawns this
+# watcher — the agent withdraws on a NSWorkspace activation event instead of
+# waking once a second, and one process serves every session. This stays for
+# machines without the agent: no Swift toolchain, permission declined, or the
+# user pinning the shell path with GHOSTTY_NOTIFY_AGENT_APP="".
+#
+# (An earlier step replaced this loop with a per-notification Swift binary. The
+# resident agent subsumed it, so that binary is gone rather than left to rot.)
+
 # Singleton per session: a newer notification round's watcher supersedes a
 # live one (the new alert replaced the old on screen — same group ID).
 #

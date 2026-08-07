@@ -35,7 +35,10 @@ HOOKS_DIR="$HOME/.claude/hooks"
 mkdir -p "$HOOKS_DIR"
 
 install_from_local() {
-    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh ghostty-round-reset.sh ghostty-notify-clear.sh; do
+    # agent-common.sh is sourced, not run, but ghostty-notify.sh and the anchor
+    # hook both need it beside them; a manual install that skipped it would
+    # silently lose the agent path.
+    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh ghostty-round-reset.sh ghostty-notify-clear.sh agent-common.sh ghostty-agent-anchor.sh; do
         cp "$LOCAL_HOOKS/$f" "$HOOKS_DIR/$f"
         chmod +x "$HOOKS_DIR/$f"
         echo "  ✓ installed $f (local)"
@@ -44,7 +47,10 @@ install_from_local() {
 
 install_from_github() {
     local RAW="https://raw.githubusercontent.com/Davie521/claude-ghostty-notify/main/hooks"
-    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh ghostty-round-reset.sh ghostty-notify-clear.sh; do
+    # agent-common.sh is sourced, not run, but ghostty-notify.sh and the anchor
+    # hook both need it beside them; a manual install that skipped it would
+    # silently lose the agent path.
+    for f in ghostty-tab-save.sh ghostty-tab-focus.sh ghostty-notify.sh ghostty-round-reset.sh ghostty-notify-clear.sh agent-common.sh ghostty-agent-anchor.sh; do
         curl -fsSL "$RAW/$f" -o "$HOOKS_DIR/$f"
         chmod +x "$HOOKS_DIR/$f"
         echo "  ✓ installed $f (remote)"
@@ -77,7 +83,10 @@ cat <<'EOF'
         "hooks": [{"type": "command", "command": "/Users/$USER/.claude/hooks/ghostty-tab-save.sh"}]
       }],
       "UserPromptSubmit": [{
-        "hooks": [{"type": "command", "command": "/Users/$USER/.claude/hooks/ghostty-round-reset.sh"}]
+        "hooks": [
+          {"type": "command", "command": "/Users/$USER/.claude/hooks/ghostty-round-reset.sh"},
+          {"type": "command", "command": "/Users/$USER/.claude/hooks/ghostty-agent-anchor.sh"}
+        ]
       }],
       "Notification": [{
         "matcher": "",

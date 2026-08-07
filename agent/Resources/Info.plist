@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Claude Ghostty Notify</string>
+    <!-- Notification authorization and the Automation grant are both keyed to
+         this identifier. Changing it re-prompts the user for both.
+         An identifier can also be BURNED: if the process ever touches
+         UNUserNotificationCenter.current() before the app finishes launching,
+         macOS answers every later authorization request for that identifier with
+         "Notifications are not allowed for this application" — no dialog, and no
+         entry in System Settings to flip. That state survives rebuilds, moving
+         the bundle, re-signing, and restarting usernoted; the only way out is a
+         new identifier. See the comment on Notifier.center, which is what keeps
+         it from happening.
+         Clicking "Don't Allow" burns an identifier the same permanent way, and
+         also leaves no System Settings entry — so an identifier gets exactly one
+         chance. Both failure modes were hit repeatedly while bringing this up,
+         burning several identifiers before this one. -->
+    <key>CFBundleIdentifier</key>
+    <string>io.github.davie521.cgnotify</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.4.0</string>
+    <!-- Must match the SwiftPM executable product name. -->
+    <key>CFBundleExecutable</key>
+    <string>ghostty-notify-agent</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <!-- No Dock tile and no application menu: this is a background agent. It
+         does own a menu bar item (see MenuBar.swift) — an accessory app can, and
+         without it there is no way to tell a working agent from one macOS has
+         silently muted. -->
+    <key>LSUIElement</key>
+    <true/>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+    <!-- NSUserNotificationAlertStyle is deliberately absent. It only ever
+         affected the deprecated NSUserNotification API; for a
+         UNUserNotificationCenter app macOS ignores it and always records Banner.
+         Verified here with a fresh bundle identifier carrying the key from first
+         registration: the notification still slid away after a few seconds. An
+         Apple engineer has confirmed publicly that alert style can no longer be
+         set programmatically and is not expected to become settable again — only
+         built-in apps get Alerts by default. The agent detects the style at
+         launch instead and points the user at the exact System Settings pane; see
+         Agent.publishAlertStyle. Do not re-add this key. -->
+    <!-- Required before macOS will even prompt for Automation. Without this key
+         the first Apple Event to Ghostty is denied outright, and clicking a
+         notification would silently fail to jump. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Claude Ghostty Notify needs to control Ghostty so that clicking a notification can jump to the terminal tab your Claude session is running in.</string>
+</dict>
+</plist>

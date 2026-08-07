@@ -63,6 +63,10 @@ export GHOSTTY_NOTIFY_BACKEND=auto         # pin: a host env override (e.g.
 # stubbed here and would poll the real lsappinfo/osascript for 30s past the
 # run. Covered by tests/test-clear-on-focus.sh instead.
 export GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0
+# The resident agent delivers through UNUserNotificationCenter, so
+# the stubbed alerter under test here would never be called. Empty (not unset)
+# is what disables it — see agent_app in hooks/agent-common.sh.
+export GHOSTTY_NOTIFY_AGENT_APP=""
 unset GHOSTTY_RESOURCES_DIR || true
 
 pass=0; fail=0

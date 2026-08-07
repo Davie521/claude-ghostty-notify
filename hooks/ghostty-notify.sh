@@ -335,17 +335,78 @@ fire_with_terminal_notifier() {
 #                           unusable, degrade to terminal-notifier VISIBLY
 #                           rather than dropping the notification silently
 #   - unset / "auto"      : prefer alerter, fall back to terminal-notifier
+#   - "agent"             : require the resident agent; do not fall back
 BACKEND="${GHOSTTY_NOTIFY_BACKEND:-auto}"
 FIRED=0
 EXPECT_ALERTER=0
-case "$BACKEND" in
-    terminal-notifier)
-        fire_with_terminal_notifier && FIRED=1
-        ;;
-    *)
-        { fire_with_alerter || fire_with_terminal_notifier; } && FIRED=1
-        ;;
-esac
+USED_AGENT=0
+
+# ── Resident agent (preferred delivery) ────────────────────────────────────
+# When the agent app is installed it owns delivery end to end: it posts through
+# UNUserNotificationCenter, withdraws the notification the moment this session's
+# Ghostty surface comes forward — a NSWorkspace activation subscription, not a
+# poll — and answers a click by focusing that surface over an Apple Event.
+#
+# That subsumes both the alerter click-handler subshell and the per-notification
+# clear-on-focus watcher, so neither runs on this path: no second process
+# outlives the hook, and nothing wakes up once a second.
+AGENT_APP=""
+if [[ "$BACKEND" == "auto" || "$BACKEND" == "agent" ]]; then
+    # shellcheck source=hooks/agent-common.sh
+    if source "$SCRIPT_DIR/agent-common.sh" 2>/dev/null; then
+        AGENT_APP=$(agent_app "$SCRIPT_DIR" 2>/dev/null || true)
+    fi
+fi
+if [[ -n "$AGENT_APP" ]]; then
+    AGENT_SOUND=""
+    [[ "$SILENT" != "true" ]] && AGENT_SOUND="$SOUND"
+    # Hand over the tab id the marker round-trip already resolved, so the very
+    # first notification of a session is localizable without waiting for an
+    # anchor — and so the agent never has to guess by sampling what is focused.
+    AGENT_TAB_ID=""
+    [[ -f "$SAVE_DIR/${SESSION_ID}.json" ]] &&
+        AGENT_TAB_ID=$(jq -r '.tab_id // empty' "$SAVE_DIR/${SESSION_ID}.json" 2>/dev/null)
+    # NOTIFY_TIMEOUT and CLEAR_ON_FOCUS are documented knobs; they have to reach
+    # the agent or they silently stop working on the preferred path. Both go over
+    # as strings (--arg, not --argjson): the agent parses either form, and a
+    # value that passes the shell's ^[0-9]+$ check can still be invalid JSON
+    # ("007"), which would make jq fail and hand agent_deliver an empty payload.
+    case "${GHOSTTY_NOTIFY_CLEAR_ON_FOCUS:-1}" in
+        0|false|no|off|FALSE|NO|OFF) AGENT_CLEAR=false ;;
+        *) AGENT_CLEAR=true ;;
+    esac
+    # agent_deliver fails when the agent is not running or macOS has not granted
+    # it permission to display anything. Falling through to the shell backends
+    # then is the whole point: a spooled request is not a delivered
+    # notification, and the invariant at the top of this file is that a missing
+    # preferred backend degrades VISIBLY.
+    if agent_deliver "$(jq -nc \
+        --arg s "$SESSION_ID" --arg t "$TITLE" --arg sub "$SUBTITLE" \
+        --arg b "$MESSAGE" --arg snd "$AGENT_SOUND" --arg tab "$AGENT_TAB_ID" \
+        --arg to "$NOTIFY_TIMEOUT" --arg clear "$AGENT_CLEAR" \
+        '{type:"notify",session_id:$s,title:$t,subtitle:$sub,body:$b,sound:$snd,
+          tab_id:$tab,timeout:$to,clear_on_focus:$clear}')" \
+        "$AGENT_APP"; then
+        FIRED=1
+        USED_AGENT=1
+    fi
+fi
+
+if [[ "$USED_AGENT" -eq 0 ]]; then
+    case "$BACKEND" in
+        agent)
+            # Explicitly requested the agent and it is unavailable. Degrade
+            # visibly rather than silently swallowing the notification.
+            fire_with_terminal_notifier && FIRED=1
+            ;;
+        terminal-notifier)
+            fire_with_terminal_notifier && FIRED=1
+            ;;
+        *)
+            { fire_with_alerter || fire_with_terminal_notifier; } && FIRED=1
+            ;;
+    esac
+fi
 
 # ── Clear-on-focus watcher ─────────────────────────────────────────────────
 # Focusing the session's tab (or Ghostty itself when the tab is unknown)
@@ -362,7 +423,9 @@ case "${GHOSTTY_NOTIFY_CLEAR_ON_FOCUS:-1}" in
     0|false|no|off|FALSE|NO|OFF) CLEAR_ON_FOCUS=0 ;;
     *) CLEAR_ON_FOCUS=1 ;;
 esac
-if [[ "$FIRED" -eq 1 && "$CLEAR_ON_FOCUS" -eq 1 ]]; then
+# The agent already withdraws on focus from inside a resident process, so the
+# watcher would be a second, worse implementation of the same feature.
+if [[ "$FIRED" -eq 1 && "$CLEAR_ON_FOCUS" -eq 1 && "$USED_AGENT" -eq 0 ]]; then
     CLEAR_SCRIPT="${GHOSTTY_NOTIFY_CLEAR_SCRIPT:-$SCRIPT_DIR/ghostty-notify-clear.sh}"
     [[ -x "$CLEAR_SCRIPT" ]] || CLEAR_SCRIPT="$HOME/.claude/hooks/ghostty-notify-clear.sh"
     if [[ -x "$CLEAR_SCRIPT" ]]; then

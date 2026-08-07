@@ -58,6 +58,9 @@ export GHOSTTY_NOTIFY_BACKEND=auto   # pin against host env overrides
 # Not under test, and its watcher would poll the real lsappinfo/osascript
 # and outlive the run (see tests/test-clear-on-focus.sh for its coverage).
 export GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0
+# The terminal-notifier fallback is the whole subject here; the resident agent
+# would deliver instead and never touch the stub. Empty disables it.
+export GHOSTTY_NOTIFY_AGENT_APP=""
 unset GHOSTTY_RESOURCES_DIR || true
 
 # The sid MUST be UUID-shaped (hex + dashes, matching ^[a-fA-F0-9-]+$).

@@ -83,13 +83,46 @@ Hooks are auto-registered via the plugin manifest — **no manual `settings.json
 
 ### 3. One macOS setting
 
-**System Settings → Notifications → Alert Style → Persistent**, for **both** the **Script Editor** and **Terminal** entries (whichever exist on your machine).
+**System Settings → Notifications → Alert Style → Persistent**, for **both** the **Script Editor** and **Terminal** entries (whichever exist on your machine). With the [native agent](#5-optional-the-native-agent) installed, the entry to change is **Claude Ghostty Notify** instead — the agent detects the wrong setting and offers to open that pane for you.
 
 > Which bundle delivers the notification depends on your alerter version: legacy alerter (≤1.x, ObjC) borrows the Script Editor bundle, while alerter 26.x (the Swift rewrite) defaults to `com.apple.Terminal` — its `--help` documents `--sender ... (default: com.apple.Terminal)`. Setting both is harmless and covers either version. **Persistent** keeps the notification on screen and shows the **Go to tab** button directly; Banner style auto-hides and tucks the button behind a "Show" chevron, where clicks won't reliably trigger.
 
 ### 4. Restart Claude Code
 
 Quit and relaunch so the new hooks load. Default thresholds (3 min / 10 min / 20 min timeout) work out of the box — see [Configuration](#configuration) to tune them.
+
+### 5. Optional: the native agent
+
+Everything above works on its own. The agent replaces the delivery path with a
+single resident app, and is worth installing if you keep several sessions going:
+
+```bash
+bash scripts/build-agent.sh     # needs a Swift toolchain (xcode-select --install)
+bash scripts/install-agent.sh   # builds a LaunchAgent and asks for permission
+```
+
+What changes:
+
+- **One process instead of one per notification.** The shell path spawns a
+  watcher per alert that wakes once a second until you come back. The agent
+  subscribes to app-activation events, so between notifications it does nothing
+  at all.
+- **Exact withdrawal.** It posts through `UNUserNotificationCenter` and removes
+  notifications by identifier, so a repeat notification for a session replaces
+  the previous one rather than stacking.
+- **A menu bar item** showing whether it is authorized, which alert style macOS
+  has it on, and how many notifications are waiting — because a background agent
+  that cannot display anything otherwise looks exactly like one that is working.
+
+Install asks for two permissions, both one-time: notifications, and controlling
+Ghostty (needed for click-to-jump). Answer both.
+
+> **Say yes to the notification prompt.** Declining is permanent for that build
+> — macOS leaves no System Settings entry to undo it, and the only recovery is a
+> new bundle identifier.
+
+Remove it with `bash scripts/install-agent.sh --uninstall`; the hooks fall back
+to the shell path on their own.
 
 ### Manual install (without the plugin system)
 
@@ -113,7 +146,9 @@ All thresholds are environment variables in your `settings.json` `env` block. Re
 | `GHOSTTY_NOTIFY_BACKEND`       | `auto` | `auto` (alerter then terminal-notifier) or `terminal-notifier` (force). Set to `terminal-notifier` if alerter notifications never appear — see Troubleshooting. The terminal-notifier backend never wires click-to-jump (its `-execute` fires on dismiss too), and a forced-but-missing alerter degrades to terminal-notifier instead of silently dropping the notification. |
 | `GHOSTTY_NOTIFY_ON_PROMPT`     | `0`    | Set to `1` to also alert (immediately, with Ping sound) on `Notification` events — permission / input prompts. Recommended if you do NOT run bypass-permissions mode. |
 | `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS` | `1`   | Auto-dismiss the notification once you focus the session's Ghostty tab — and on your next prompt in that session. When the tab is unknown (tmux, unscriptable Ghostty) it degrades to "Ghostty becomes frontmost again". Turn it off with `0`, `false`, `no`, or `off`; any other value leaves it on. |
-| `GHOSTTY_NOTIFY_FOCUS_POLL`    | `1`    | Clear-on-focus poll interval in seconds (decimals allowed). `0` would spin the watcher, so it falls back to the default. |
+| `GHOSTTY_NOTIFY_FOCUS_POLL`    | `1`    | Clear-on-focus poll interval in seconds (decimals allowed). `0` would spin the watcher, so it falls back to the default. Ignored when the native agent is delivering — it has no poll. |
+| `GHOSTTY_NOTIFY_AGENT_APP`     | *(discovered)* | Path to the agent bundle. Set it **empty** to pin the shell path and ignore an installed agent. Unset means "use it if it is there"; a path that is not an executable bundle is refused rather than trusted. |
+| `GHOSTTY_NOTIFY_MENU_BAR`      | `1`    | The agent's menu bar item. `0`, `false`, `no` or `off` hides it — at the cost of losing the only visible sign that the agent is alive and permitted. |
 
 Values must be plain integers (seconds); anything else falls back to the default (`GHOSTTY_NOTIFY_FOCUS_POLL` also accepts decimals).
 
@@ -204,6 +239,8 @@ Mostly historical. `alerter` blocks until you click an action, it times out (`GH
 
 **`ghostty-tab-focus.sh` (on click):** activates Ghostty, reads `tab_id` from the session file, and uses Ghostty's native AppleScript `select tab` command — a real verb in the sdef, not a property write, so no accessibility permission is needed.
 
+**With the [native agent](#5-optional-the-native-agent) installed,** the last three of those collapse into one resident process. `ghostty-notify.sh` still decides *whether* and *what* to notify, then hands the request to the agent through a spool directory (one JSON file per request, published by rename) instead of firing `alerter`. The agent posts through `UNUserNotificationCenter`, withdraws on a `NSWorkspace` activation event rather than a poll, and answers clicks itself — so no watcher is spawned, nothing wakes on a timer, and `ghostty-notify-clear.sh` never runs. The agent refuses the request when macOS has not authorized it, which is what sends the hook back to `alerter` rather than dropping the notification silently.
+
 ### Design notes
 
 - **Why `session_id` and not `$PPID`?** Claude Code spawns intermediate shells with non-deterministic PIDs between hook invocations. `session_id` (from hook stdin JSON) is stable across the whole conversation, including `--resume`.
@@ -214,6 +251,8 @@ Mostly historical. `alerter` blocks until you click an action, it times out (`GH
 
 **Plugin install:** `/plugin uninstall claude-ghostty-notify` — hooks are automatically deregistered.
 
+**Native agent** (if you installed it): `bash scripts/install-agent.sh --uninstall`, then `rm -rf ~/.claude/notifications/ghostty-agent`. Revoking its notification permission is a separate step in System Settings → Notifications.
+
 **Manual install:**
 
 ```bash
@@ -221,7 +260,9 @@ rm -f ~/.claude/hooks/ghostty-tab-save.sh \
       ~/.claude/hooks/ghostty-tab-focus.sh \
       ~/.claude/hooks/ghostty-notify.sh \
       ~/.claude/hooks/ghostty-round-reset.sh \
-      ~/.claude/hooks/ghostty-notify-clear.sh
+      ~/.claude/hooks/ghostty-notify-clear.sh \
+      ~/.claude/hooks/ghostty-agent-anchor.sh \
+      ~/.claude/hooks/agent-common.sh
 rm -rf ~/.claude/notifications/ghostty-sessions
 rm -f ~/.claude/notifications/state/ghostty-notify-*
 ```

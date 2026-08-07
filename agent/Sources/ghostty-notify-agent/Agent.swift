@@ -1,0 +1,538 @@
+import AppKit
+import Foundation
+import NotifyCore
+import UserNotifications
+
+/// The resident app. One process serves every Claude session on the machine:
+/// it owns the notification center, subscribes to app-activation events instead
+/// of polling for them, and answers clicks by driving Ghostty over Apple Events.
+///
+/// Nothing here decides *whether* to withdraw a notification — that lives in
+/// `NotifyCore.SessionState` so the rules can be tested without a run loop.
+@MainActor
+final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDelegate {
+    private let paths: AgentPaths
+    private let notifier: Notifier
+    private var state = SessionState()
+    private var spool: SpoolWatcher?
+    private var pruneTimer: DispatchSourceTimer?
+    private var activationObserver: NSObjectProtocol?
+    private var terminationSource: DispatchSourceSignal?
+    private var menuBar: MenuBar?
+    private var authorized = false
+    private var alertStyle = ""
+    /// Per-identifier expiry timers, so a replacement notification restarts the
+    /// clock instead of inheriting the old one's deadline.
+    private var expiryTimers: [String: DispatchSourceTimer] = [:]
+
+    init(paths: AgentPaths) {
+        self.paths = paths
+        let logPath = paths.log
+        self.notifier = Notifier(log: { AgentLog.append($0, to: logPath) })
+        super.init()
+    }
+
+    // MARK: - Lifecycle
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        try? FileManager.default.createDirectory(
+            atPath: paths.root, withIntermediateDirectories: true)
+        writePidFile()
+        loadState()
+        log("agent up pid=\(getpid()) bundle=\(Bundle.main.bundleIdentifier ?? "<none>")")
+
+        notifier.setDelegate(self)
+        notifier.registerCategories()
+        notifier.requestAuthorization { [weak self] granted in
+            guard let self else { return }
+            self.authorized = granted
+            self.log("authorization granted=\(granted)")
+            // Publish the answer: until this file says "authorized", the hooks
+            // must not treat a spooled request as a delivered notification, or a
+            // user who clicked "Don't Allow" would silently get nothing at all.
+            self.publishReadiness(granted)
+            if !granted {
+                self.log("notifications are not authorized — see System Settings › Notifications")
+                return
+            }
+            self.publishAlertStyle()
+        }
+
+        observeActivation()
+        startPruning()
+        handleTermination()
+        installMenuBar()
+
+        let watcher = SpoolWatcher(
+            directory: paths.spool,
+            log: { [weak self] in self?.log($0) },
+            onRequest: { [weak self] in self?.handle($0) }
+        )
+        watcher.start()
+        spool = watcher
+    }
+
+    /// Turn SIGTERM into an orderly shutdown.
+    ///
+    /// launchd stops the agent with SIGTERM, and the default disposition kills
+    /// the process outright — `applicationWillTerminate` never runs, so the
+    /// pidfile and the readiness marker are left claiming a live, authorized
+    /// agent. `agent_ready` in the hooks checks the process too, so nothing
+    /// misroutes because of it, but a liveness marker that outlives the process
+    /// it describes is a trap for the next reader.
+    private func handleTermination() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler {
+            MainActor.assumeIsolated {
+                NSApp.terminate(nil)
+            }
+        }
+        source.resume()
+        terminationSource = source
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        saveState()
+        try? FileManager.default.removeItem(atPath: paths.pidFile)
+        // Readiness is about a live agent, so it must not outlive the process:
+        // a stale "authorized" would keep hooks routing into a dead spool.
+        try? FileManager.default.removeItem(atPath: paths.readyFile)
+        log("agent down")
+    }
+
+    // MARK: - Requests
+
+    private func handle(_ request: AgentRequest) {
+        switch request {
+        case .notify(let notify):
+            // A tab id supplied by the hook is authoritative: it came from the
+            // marker round-trip, which is correct regardless of what is focused
+            // now. Record it before deciding anything.
+            state.anchor(sessionID: notify.sessionID, tabID: notify.tabID, now: Agent.now())
+            deliver(notify)
+            shortenIfAlreadyWatching(notify)
+
+        case .dismiss(let sessionID):
+            let identifiers = state.takeNotifications(sessionID: sessionID)
+            cancelExpiry(identifiers)
+            notifier.withdraw(identifiers)
+            saveState()
+
+        case .anchor(let sessionID, let tabID):
+            if let tabID {
+                state.anchor(sessionID: sessionID, tabID: tabID, now: Agent.now())
+                log("anchored \(sessionID) -> \(tabID)")
+                saveState()
+            } else {
+                // No id from the hook (tmux, or the marker round-trip never
+                // succeeded). Sampling the focused tab is a guess — the drain
+                // can run a second after the prompt was submitted — so it only
+                // fills a gap, never overwrites a known id.
+                let known = state.sessions[sessionID]?.tabID
+                guard known == nil else {
+                    state.anchor(sessionID: sessionID, tabID: known, now: Agent.now())
+                    saveState()
+                    return
+                }
+                Ghostty.selectedTabID { [weak self] selected in
+                    guard let self else { return }
+                    self.state.anchor(
+                        sessionID: sessionID, tabID: selected, now: Agent.now())
+                    self.log("anchored \(sessionID) -> \(selected ?? "<unknown>") (sampled)")
+                    self.saveState()
+                }
+            }
+
+        case .ping:
+            log("pong")
+
+        case .styleHint:
+            offerStyleGuidance(force: true)
+        }
+    }
+
+    /// Restores the shell watcher's "already staring at it" clear.
+    ///
+    /// No activation event ever fires when the user watched the round finish in
+    /// the session's own tab, because Ghostty never stopped being frontmost — so
+    /// without this the notification would sit there until a prompt or a click.
+    ///
+    /// The notification is posted first and only its expiry is shortened, rather
+    /// than suppressed outright: the shell path played the sound and then
+    /// removed the banner about a second later, and swallowing the request
+    /// entirely would take the audible cue with it. Three seconds is the grace
+    /// Ghostty itself uses for a notification raised on an already-focused
+    /// surface, and posting first keeps the banner immediate — the Apple Event
+    /// happens after delivery, never in front of it.
+    private func shortenIfAlreadyWatching(_ notify: NotifyRequest) {
+        guard notify.clearOnFocus,
+            frontmostIsGhostty,
+            let tabID = state.sessions[notify.sessionID]?.tabID
+        else { return }
+
+        let identifier = SessionState.notificationID(sessionID: notify.sessionID)
+        Ghostty.selectedTabID { [weak self] selected in
+            guard let self, let selected, selected == tabID else { return }
+            self.log("\(notify.sessionID) is already on screen; clearing in short order")
+            self.scheduleExpiry(identifier: identifier, after: Agent.watchedGraceSeconds)
+        }
+    }
+
+    private static let watchedGraceSeconds: Double = 3
+
+    private func deliver(_ notify: NotifyRequest) {
+        let identifier = state.newNotification(
+            sessionID: notify.sessionID, clearOnFocus: notify.clearOnFocus, now: Agent.now())
+        notifier.post(identifier: identifier, sessionID: notify.sessionID, request: notify)
+        log("posted \(identifier)")
+        scheduleExpiry(identifier: identifier, after: notify.timeout)
+        saveState()
+    }
+
+    /// Mirrors the shell path's `--timeout`: without it a notification for a
+    /// session the user never returns to would sit in Notification Center until
+    /// the 24h prune, rather than the documented GHOSTTY_NOTIFY_TIMEOUT.
+    private func scheduleExpiry(identifier: String, after seconds: Double?) {
+        expiryTimers.removeValue(forKey: identifier)?.cancel()
+        guard let seconds, seconds > 0 else { return }
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + seconds, leeway: .seconds(1))
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.expiryTimers.removeValue(forKey: identifier)
+                guard let sessionID = self.state.sessionID(forNotification: identifier) else {
+                    return
+                }
+                let identifiers = self.state.takeNotifications(sessionID: sessionID)
+                self.notifier.withdraw(identifiers)
+                self.log("expired \(identifier)")
+                self.saveState()
+            }
+        }
+        timer.resume()
+        expiryTimers[identifier] = timer
+    }
+
+    private func cancelExpiry(_ identifiers: [String]) {
+        for identifier in identifiers {
+            expiryTimers.removeValue(forKey: identifier)?.cancel()
+        }
+    }
+
+    // MARK: - Focus
+
+    private var frontmostIsGhostty: Bool {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+            == AgentConstants.ghosttyBundleID
+    }
+
+    /// The replacement for the shell version's one-second poll loop. macOS tells
+    /// us when an app comes forward; between events this process is idle and
+    /// spawns nothing.
+    private func observeActivation() {
+        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            // Reduce to a Sendable value before crossing: the notification and
+            // its NSRunningApplication must not follow us onto the main actor.
+            let app =
+                notification.userInfo?[NSWorkspace.applicationUserInfoKey]
+                as? NSRunningApplication
+            let bundleID = app?.bundleIdentifier
+            MainActor.assumeIsolated {
+                self?.activated(bundleID: bundleID)
+            }
+        }
+    }
+
+    private func activated(bundleID: String?) {
+        guard bundleID == AgentConstants.ghosttyBundleID else { return }
+        withdrawForGhostty(retriesLeft: 1)
+    }
+
+    private func withdrawForGhostty(retriesLeft: Int) {
+        // Cheap guard first. Asking Ghostty which tab is selected is an Apple
+        // Event round-trip, and the first one raises the Automation consent
+        // dialog — neither belongs on a plain Cmd-Tab with nothing on screen.
+        guard state.hasOutstandingNotifications else { return }
+
+        Ghostty.selectedTabID { [weak self] selected in
+            guard let self else { return }
+            let identifiers = self.state.takeNotifications(
+                for: .ghosttyActivated(selectedTabID: selected))
+            if !identifiers.isEmpty {
+                self.cancelExpiry(identifiers)
+                self.notifier.withdraw(identifiers)
+                self.saveState()
+                return
+            }
+            // Ghostty's scripting state can trail the activation by a few
+            // milliseconds, so a query issued the instant it comes forward may
+            // name the previously selected tab. One retry covers that without
+            // reintroducing a poll.
+            guard retriesLeft > 0, self.state.hasOutstandingNotifications else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                self?.withdrawForGhostty(retriesLeft: retriesLeft - 1)
+            }
+        }
+    }
+
+    // MARK: - Clicks
+
+    /// The notification center does not promise which thread it delivers a
+    /// response on — Ghostty shipped a fix for exactly that hazard (its PR #7531,
+    /// point 4). So this stays `nonisolated`, reduces the response to Sendable
+    /// values, and hops to the main actor before touching any state.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        let identifier = response.notification.request.identifier
+        let action = response.actionIdentifier
+        let sessionID = response.notification.request.content.userInfo["session_id"] as? String
+        let finish = UncheckedBox(completionHandler)
+        Task { @MainActor in
+            self.clicked(identifier: identifier, action: action, sessionID: sessionID)
+            finish.value()
+        }
+    }
+
+    private func clicked(identifier: String, action: String, sessionID: String?) {
+        // Fall back to the bookkeeping when userInfo is unavailable, so a click
+        // still routes after an upgrade that changed the payload.
+        let session = sessionID ?? state.sessionID(forNotification: identifier)
+        state.forgetNotification(identifier)
+        cancelExpiry([identifier])
+        saveState()
+
+        switch action {
+        case UNNotificationDismissActionIdentifier:
+            // Closing a notification is not a request to go anywhere. The shell
+            // version had exactly this bug — alerter's close-button label was
+            // matched as an action and phantom-activated Ghostty — which is why
+            // tests/test-alerter-dispatch.sh exists.
+            log("dismissed \(identifier)")
+        case UNNotificationDefaultActionIdentifier, AgentConstants.gotoActionID:
+            jump(sessionID: session)
+        default:
+            log("ignored action \(action) on \(identifier)")
+        }
+    }
+
+    /// Present the banner even while we are frontmost. As an accessory app we
+    /// are never meaningfully "in front", but the notification a user asked for
+    /// should not depend on that. Touches no state, so it answers inline.
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) ->
+            Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+
+    private func jump(sessionID: String?) {
+        // Prefer live bookkeeping, then the id ghostty-tab-save.sh persisted —
+        // which survives an agent that lost its state file.
+        var tabID = sessionID.flatMap { state.sessions[$0]?.tabID }
+        if tabID == nil, let sessionID {
+            tabID = Agent.persistedTabID(paths: paths, sessionID: sessionID)
+        }
+        // Claim the activation the click just handed us before trying to move
+        // another app's windows. macOS only lets the active application hand
+        // activation on; from the background both the Apple Event and
+        // NSRunningApplication requests are dropped, which is exactly how a
+        // click could report success and yet leave Ghostty behind whatever the
+        // user was actually looking at.
+        NSApp.activate(ignoringOtherApps: true)
+
+        guard let tabID else {
+            // No tab was ever resolved (tmux, unscriptable Ghostty). Front the
+            // app so the user is one keystroke away instead of nowhere.
+            log("jump: no tab for \(sessionID ?? "<none>"), activating Ghostty")
+            Ghostty.activate()
+            return
+        }
+        // Select the tab first, then bring the app forward — so what appears is
+        // already the right tab rather than whatever was last in front.
+        Ghostty.focus(tabID: tabID) { [weak self] selected in
+            guard let self else { return }
+            Ghostty.activate()
+            switch selected {
+            case nil:
+                self.log("jump: \(tabID) not found, activated Ghostty only")
+            case tabID:
+                self.log("jump: focused \(tabID), verified selected")
+            case .some(let other):
+                // Selecting reported success but the selection did not stick.
+                // Worth its own line: it is the difference between "we asked"
+                // and "it happened", and the two look identical from outside.
+                self.log("jump: asked for \(tabID) but \(other) is selected")
+            }
+        }
+    }
+
+    /// Reads the tab id ghostty-tab-save.sh wrote for a session.
+    private static func persistedTabID(paths: AgentPaths, sessionID: String) -> String? {
+        guard RequestCodec.isValidSessionID(sessionID) else { return nil }
+        let path = paths.sessionTabFile(sessionID: sessionID)
+        guard let data = FileManager.default.contents(atPath: path),
+            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            let tabID = object["tab_id"] as? String,
+            !tabID.isEmpty
+        else { return nil }
+        return tabID
+    }
+
+    // MARK: - Housekeeping
+
+    private func startPruning() {
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 3600, repeating: 3600, leeway: .seconds(300))
+        timer.setEventHandler { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let orphaned = self.state.prune(
+                    maxAge: AgentConstants.sessionMaxAge, now: Agent.now())
+                self.cancelExpiry(orphaned)
+                self.notifier.withdraw(orphaned)
+                self.saveState()
+            }
+        }
+        timer.resume()
+        pruneTimer = timer
+    }
+
+    private func writePidFile() {
+        try? "\(getpid())\n".write(toFile: paths.pidFile, atomically: true, encoding: .utf8)
+    }
+
+    /// Record the notification style and, when it is Banner, say plainly what
+    /// that costs and how to change it.
+    ///
+    /// Banner notifications slide away after about five seconds. Clicking one is
+    /// how you jump to the session's tab, so on Banner the jump is only reachable
+    /// through Notification Center. No app can change this: Apple removed the
+    /// ability, and only built-in apps get Alerts by default. Detecting it and
+    /// pointing at the exact pane is the whole of what is available — which is
+    /// what other apps in this position do.
+    private func publishAlertStyle() {
+        notifier.currentAlertStyle { [weak self] style in
+            guard let self else { return }
+            self.alertStyle = style
+            try? (style + "\n").write(
+                toFile: self.paths.alertStyleFile, atomically: true, encoding: .utf8)
+            self.log("alert style = \(style)")
+            guard style == "banner" else { return }
+            self.log(
+                "temporary style: notifications slide away after a few seconds, so "
+                    + "click-to-jump is only reachable from Notification Center. Fix at "
+                    + "System Settings › Notifications › \(Self.appName) › Alert Style › "
+                    + "Persistent  (deep link: \(Self.notificationSettingsURL))")
+            self.offerStyleGuidance(force: false)
+        }
+    }
+
+    /// One-time guidance walking the user to the setting.
+    ///
+    /// A log line is not guidance for something the product does not work
+    /// properly without, and this cannot be fixed in code — so the app has to
+    /// ask. Shown at most once unless `force` (a `style_hint` request), because a
+    /// login-launched background agent nagging on every restart would be worse
+    /// than the problem.
+    ///
+    /// Deliberately a non-modal window: see StyleHintWindow for what an
+    /// NSAlert.runModal() did to the rest of the agent.
+    func offerStyleGuidance(force: Bool) {
+        let marker = paths.styleHintShownFile
+        if !force, FileManager.default.fileExists(atPath: marker) { return }
+        try? "shown\n".write(toFile: marker, atomically: true, encoding: .utf8)
+
+        StyleHintWindow.show(
+            settingsURL: Self.notificationSettingsURL,
+            appName: Self.appName,
+            log: { [weak self] in self?.log($0) }
+        )
+    }
+
+    /// The only always-visible surface the agent has. Without it, "running and
+    /// working" and "running but unable to display anything" look identical from
+    /// outside — which is the state an unanswered permission prompt or the
+    /// Temporary alert style leaves it in.
+    private func installMenuBar() {
+        guard MenuBar.isEnabled(env: ProcessInfo.processInfo.environment) else {
+            log("menu bar item disabled by GHOSTTY_NOTIFY_MENU_BAR")
+            return
+        }
+        menuBar = MenuBar(
+            status: { [weak self] in
+                guard let self else {
+                    return AgentStatus(
+                        authorized: false, alertStyle: "", outstandingNotifications: 0,
+                        trackedSessions: 0)
+                }
+                return AgentStatus(
+                    authorized: self.authorized,
+                    alertStyle: self.alertStyle,
+                    outstandingNotifications: self.state.sessions.values
+                        .reduce(0) { $0 + $1.notificationIDs.count },
+                    trackedSessions: self.state.sessions.count
+                )
+            },
+            onShowGuidance: { [weak self] in self?.offerStyleGuidance(force: true) },
+            onOpenSettings: { [weak self] in
+                guard let url = URL(string: Agent.notificationSettingsURL) else { return }
+                NSWorkspace.shared.open(url)
+                self?.log("menu: opened notification settings")
+            },
+            onOpenLog: { [weak self] in
+                guard let self else { return }
+                NSWorkspace.shared.open(URL(fileURLWithPath: self.paths.log))
+            }
+        )
+    }
+
+    private static let appName = "Claude Ghostty Notify"
+    /// Opens System Settings straight at this app's own notification pane.
+    static var notificationSettingsURL: String {
+        let bundleID = Bundle.main.bundleIdentifier ?? ""
+        return "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleID)"
+    }
+
+    private func publishReadiness(_ granted: Bool) {
+        let value = granted ? AgentConstants.readyAuthorized : AgentConstants.readyDenied
+        try? (value + "\n").write(toFile: paths.readyFile, atomically: true, encoding: .utf8)
+    }
+
+    private func loadState() {
+        guard let data = FileManager.default.contents(atPath: paths.state) else { return }
+        state = StateCodec.decode(data)
+        log("restored \(state.sessions.count) sessions")
+    }
+
+    private func saveState() {
+        guard let data = try? StateCodec.encode(state) else { return }
+        // Atomic: a crash mid-write must not leave bookkeeping that decodes to
+        // half a truth. `Data.write(options: .atomic)` handles the
+        // does-not-exist-yet case, which replaceItemAt does not.
+        try? data.write(to: URL(fileURLWithPath: paths.state), options: [.atomic])
+    }
+
+    private static func now() -> Double { Date().timeIntervalSince1970 }
+
+    private func log(_ message: String) {
+        AgentLog.append(message, to: paths.log)
+    }
+}
+
+/// Carries a non-Sendable completion handler across an actor hop. Safe by usage,
+/// not by type: each one is called exactly once, on the main actor.
+private struct UncheckedBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}

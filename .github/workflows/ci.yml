@@ -26,7 +26,7 @@ jobs:
 
       - name: Bash syntax check
         run: |
-          for f in hooks/*.sh install.sh tests/*.sh; do
+          for f in hooks/*.sh install.sh tests/*.sh scripts/*.sh; do
             bash -n "$f" && echo "  ok  $f"
           done
 
@@ -34,7 +34,7 @@ jobs:
         # --severity=warning skips info/style noise (e.g. SC1003 on the
         # intentional OSC 2 String Terminator) while still failing on any
         # warning or error.
-        run: shellcheck --severity=warning hooks/*.sh install.sh tests/*.sh
+        run: shellcheck --severity=warning hooks/*.sh install.sh tests/*.sh scripts/*.sh
 
       - name: Validate JSON
         run: |
@@ -48,3 +48,21 @@ jobs:
           bash tests/test-fallback-no-focus.sh
           bash tests/test-session-title.sh
           bash tests/test-clear-on-focus.sh
+
+      # The resident agent is optional at runtime — every step above pins the
+      # shell path, so a Swift failure here can never mask a shell regression.
+      - name: Swift toolchain
+        run: swift --version
+
+      - name: NotifyCore unit tests
+        run: swift test --package-path agent
+
+      - name: Build resident agent bundle
+        run: bash scripts/build-agent.sh
+
+      # Skips itself with a loud SKIP line when the runner has no Aqua session,
+      # because the agent is an AppKit app. It never asserts that a banner
+      # appeared — that needs an authorization grant only a human can give — so
+      # the NotifyCore suites above stay the real gate.
+      - name: Resident agent integration test
+        run: bash tests/test-agent.sh
