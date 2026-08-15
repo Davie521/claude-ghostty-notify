@@ -17,9 +17,17 @@ public enum AgentConstants {
     public static let staleNotifyAge: Double = 300
     /// Written by the agent once the notification authorization answer is
     /// known. The hooks read it to decide whether routing through the agent
-    /// would actually display anything.
+    /// would actually display anything; they match only `readyAuthorized`, so
+    /// every other value falls back to the shell delivery path.
     public static let readyAuthorized = "authorized"
+    /// The dialog was shown and the user clicked "Don't Allow" — permanent for
+    /// this bundle identifier.
     public static let readyDenied = "denied"
+    /// The system refused to process the request: no dialog appeared and no
+    /// answer was recorded. Seen on a bundle's first contact with the
+    /// notification system, before its registration has settled — a later
+    /// launch can succeed, so this must never be reported as the user's answer.
+    public static let readyError = "error"
 }
 
 public enum AgentPathsError: Error, Equatable {

@@ -43,19 +43,31 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         notifier.setDelegate(self)
         notifier.registerCategories()
-        notifier.requestAuthorization { [weak self] granted in
+        notifier.requestAuthorization { [weak self] answer in
             guard let self else { return }
-            self.authorized = granted
-            self.log("authorization granted=\(granted)")
             // Publish the answer: until this file says "authorized", the hooks
             // must not treat a spooled request as a delivered notification, or a
             // user who clicked "Don't Allow" would silently get nothing at all.
-            self.publishReadiness(granted)
-            if !granted {
+            // The three values matter to the install script, which retries an
+            // "error" (the system never showed the dialog) but must not retry a
+            // "denied" (the user answered, and macOS holds it against the
+            // bundle identifier for good).
+            switch answer {
+            case .granted:
+                self.authorized = true
+                self.log("authorization granted=true")
+                self.publishReadiness(AgentConstants.readyAuthorized)
+                self.publishAlertStyle()
+            case .denied:
+                self.authorized = false
+                self.log("authorization granted=false")
+                self.publishReadiness(AgentConstants.readyDenied)
                 self.log("notifications are not authorized — see System Settings › Notifications")
-                return
+            case .unavailable:
+                self.authorized = false
+                self.publishReadiness(AgentConstants.readyError)
+                self.log("authorization request was not processed; no dialog was shown — a relaunch can succeed")
             }
-            self.publishAlertStyle()
         }
 
         observeActivation()
@@ -504,8 +516,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         return "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bundleID)"
     }
 
-    private func publishReadiness(_ granted: Bool) {
-        let value = granted ? AgentConstants.readyAuthorized : AgentConstants.readyDenied
+    private func publishReadiness(_ value: String) {
         try? (value + "\n").write(toFile: paths.readyFile, atomically: true, encoding: .utf8)
     }
 
