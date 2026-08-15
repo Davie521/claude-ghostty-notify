@@ -35,10 +35,10 @@ enum Singleton {
 
         // And actually us, not a recycled pid belonging to something unrelated.
         // proc_pidpath rather than spawning `ps`: this runs on every launch.
-        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        var buffer = [UInt8](repeating: 0, count: Int(MAXPATHLEN))
         let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
         guard length > 0 else { return nil }
-        let path = String(cString: buffer)
+        let path = String(decoding: buffer[..<Int(length)], as: UTF8.self)
         guard path == ProcessInfo.processInfo.arguments[0]
             || path.hasSuffix("/ghostty-notify-agent")
         else { return nil }

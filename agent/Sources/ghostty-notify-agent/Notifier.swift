@@ -53,13 +53,28 @@ final class Notifier {
         center.delegate = delegate
     }
 
-    func requestAuthorization(_ completion: @escaping @MainActor (Bool) -> Void) {
+    /// The three ways an authorization request can come back. `granted=false`
+    /// alone is ambiguous: with an error attached it means the system refused
+    /// to process the request — no dialog appeared, nothing was recorded, and a
+    /// later launch can succeed. Without one it means the dialog was shown and
+    /// the user said no, which macOS makes permanent for this bundle
+    /// identifier. Collapsing the two had the install script telling users
+    /// their identifier was burned when a plain retry would have worked.
+    enum AuthorizationAnswer {
+        case granted
+        case denied
+        case unavailable(String)
+    }
+
+    func requestAuthorization(_ completion: @escaping @MainActor (AuthorizationAnswer) -> Void) {
         center.requestAuthorization(options: [.alert, .sound]) { [log] granted, error in
             Task { @MainActor in
                 if let error {
                     log("authorization error: \(error.localizedDescription)")
+                    completion(.unavailable(error.localizedDescription))
+                } else {
+                    completion(granted ? .granted : .denied)
                 }
-                completion(granted)
             }
         }
     }

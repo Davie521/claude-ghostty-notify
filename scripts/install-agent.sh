@@ -88,31 +88,53 @@ PLIST_EOF
 # normally. So: prompt once here, wait for the answer, and only then install the
 # LaunchAgent, which from then on merely restarts an already-authorized app.
 READY="$HOME/.claude/notifications/ghostty-agent/ready"
-if [[ "$(cat "$READY" 2>/dev/null)" != "authorized" ]]; then
-    echo "==> Requesting notification permission (a dialog will appear)"
-    echo "    Click Allow. Clicking Don't Allow permanently disables this build's"
-    echo "    identifier — macOS leaves no System Settings entry to undo it."
+
+# One prompt round trip: launch through LaunchServices, wait for the agent to
+# publish an answer, read it, then stop that instance. Stopping matters twice
+# over — leaving it running would make it the incumbent, and the singleton
+# guard would then send launchd's instance away, leaving launchd with nothing
+# to restart if the agent ever crashes. Read BEFORE stopping: an orderly
+# shutdown removes the readiness marker (it must not outlive the process it
+# describes), so reading afterwards reports "no answer" for a grant that in
+# fact succeeded.
+prompt_once() {
+    rm -f "$READY"
     open -a "$APP"
     for _ in $(seq 1 120); do
         [[ -s "$READY" ]] && break
         sleep 1
     done
-    # Read the answer BEFORE stopping that instance: an orderly shutdown removes
-    # the readiness marker (it must not outlive the process it describes), so
-    # reading afterwards reports "no answer" for a grant that in fact succeeded.
     ANSWER=$(cat "$READY" 2>/dev/null || true)
-
-    # Stop the instance that was only here to answer the prompt. Leaving it
-    # would make it the incumbent, and the singleton guard would then send
-    # launchd's instance away — leaving launchd with nothing to restart if the
-    # agent ever crashes.
     pkill -f "$BIN" 2>/dev/null || true
     sleep 1
+}
+
+if [[ "$(cat "$READY" 2>/dev/null)" != "authorized" ]]; then
+    echo "==> Requesting notification permission (a dialog will appear)"
+    echo "    Click Allow. Clicking Don't Allow permanently disables this build's"
+    echo "    identifier — macOS leaves no System Settings entry to undo it."
+    prompt_once
+
+    # "error" is not the user's answer: the system refused to process the
+    # request and no dialog ever appeared — seen on a bundle's first contact
+    # with the notification system, before its registration settles. One
+    # retry usually lands the dialog; reporting it as DENIED told users their
+    # identifier was permanently burned when it was nothing of the sort.
+    if [[ "$ANSWER" == "error" ]]; then
+        echo "    macOS did not process the request (no dialog appeared); retrying once"
+        sleep 2
+        prompt_once
+    fi
+
     case "$ANSWER" in
         authorized) echo "    granted" ;;
         denied)
-            echo "    DENIED — the agent cannot display notifications." >&2
-            echo "    Hooks will keep using the alerter/terminal-notifier path." >&2
+            echo "    DENIED — the user declined, so the agent cannot display" >&2
+            echo "    notifications. Hooks will keep using the alerter/terminal-notifier path." >&2
+            ;;
+        error)
+            echo "    macOS refused the request twice (no dialog was shown)." >&2
+            echo "    This is a registration hiccup, not a denial — rerun this script." >&2
             ;;
         *) echo "    no answer yet; the agent will keep running and can be re-asked" >&2 ;;
     esac
