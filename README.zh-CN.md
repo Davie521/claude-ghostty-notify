@@ -104,7 +104,7 @@ bash scripts/install-agent.sh   # 编译 LaunchAgent 并申请权限
 
 - **一个进程,而不是每条通知一个。** shell 路径每弹一条通知就派一个 watcher,每秒醒一次直到你回来;agent 订阅 app 激活事件,两条通知之间什么都不做。
 - **精确撤回。** 它经 `UNUserNotificationCenter` 发送、按 identifier 撤回,所以同一 session 的新通知会**替换**旧的而不是堆叠。
-- **菜单栏图标**,显示是否已授权、macOS 给它的提醒样式是哪种、有几条通知待处理 —— 否则一个显示不出任何东西的后台进程,和一个正常工作的长得一模一样。
+- **菜单栏图标**,图标上就带着「几个 session 在等你」的计数,菜单里逐条列出 —— 每一行原样重复那条通知的内容,点一下跳到它的 tab。在 Temporary 提醒样式下通知没等你点就滑走了,这是唯一的回去的路。它同时显示是否已授权、macOS 给它的提醒样式是哪种 —— 否则一个显示不出任何东西的后台进程,和一个正常工作的长得一模一样。
 
 安装时会要两个权限,都是一次性的:通知、以及控制 Ghostty(点击跳转要用)。两个都要允许。
 
@@ -136,7 +136,7 @@ cd claude-ghostty-notify
 | `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS` | `1`   | 聚焦到会话所在 tab 时自动清除通知,在该会话提交新 prompt 时同样清除。tab 未知时(tmux、Ghostty 不可脚本化)降级为「Ghostty 重新回到前台时清除」。用 `0`/`false`/`no`/`off` 关闭;其他值一律视为开启 |
 | `GHOSTTY_NOTIFY_FOCUS_POLL`    | `1`    | 聚焦检测的轮询间隔(秒,可用小数)。`0` 会让 watcher 空转,因此回落到默认值。走 agent 投递时无意义 —— 它没有轮询 |
 | `GHOSTTY_NOTIFY_AGENT_APP`     | *(自动发现)* | agent bundle 的路径。设成**空字符串**可以钉住 shell 路径、无视已安装的 agent;不设则「有就用」;指向一个不是可执行 bundle 的路径会被拒绝而不是盲信 |
-| `GHOSTTY_NOTIFY_MENU_BAR`      | `1`    | agent 的菜单栏图标。`0`/`false`/`no`/`off` 隐藏 —— 代价是失去「agent 还活着且有权限」的唯一可见凭据 |
+| `GHOSTTY_NOTIFY_MENU_BAR`      | `1`    | agent 的菜单栏图标。`0`/`false`/`no`/`off` 隐藏 —— 代价是失去待处理计数、逐条跳转的列表,以及「agent 还活着且有权限」的唯一可见凭据 |
 
 值必须是纯整数(秒),否则回落到默认值(`GHOSTTY_NOTIFY_FOCUS_POLL` 可用小数)。
 

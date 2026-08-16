@@ -44,9 +44,25 @@ final class Notifier {
             identifier: AgentConstants.categoryID,
             actions: [goto],
             intentIdentifiers: [],
-            options: []
+            // Without .customDismissAction macOS tells us nothing when the user
+            // clears the notification themselves, so the agent goes on believing
+            // it is on screen. The delegate already handles
+            // UNNotificationDismissActionIdentifier; this is what makes it fire.
+            options: [.customDismissAction]
         )
         center.setNotificationCategories([category])
+    }
+
+    /// Identifiers macOS still has on screen.
+    ///
+    /// The reconciliation source for bookkeeping that outlived its
+    /// notification — a "Clear All" while this process was not running arrives
+    /// no other way.
+    func deliveredIdentifiers(_ completion: @escaping @MainActor (Set<String>) -> Void) {
+        center.getDeliveredNotifications { delivered in
+            let identifiers = Set(delivered.map { $0.request.identifier })
+            Task { @MainActor in completion(identifiers) }
+        }
     }
 
     func setDelegate(_ delegate: UNUserNotificationCenterDelegate) {

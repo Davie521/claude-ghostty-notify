@@ -83,6 +83,13 @@ public enum StateCodec {
             var notificationIDs: [String]
             var clearOnFocus: Bool?
             var updatedAt: Double
+            /// Optional so state written by an older agent still decodes. A
+            /// required field here would make one upgrade throw away every
+            /// session's resolved tab id, which is what click-to-jump runs on.
+            var title: String?
+            var subtitle: String?
+            var body: String?
+            var postedAt: Double?
         }
         var sessions: [String: Record]
     }
@@ -94,7 +101,11 @@ public enum StateCodec {
                     tabID: $0.tabID,
                     notificationIDs: $0.notificationIDs,
                     clearOnFocus: $0.clearOnFocus,
-                    updatedAt: $0.updatedAt)
+                    updatedAt: $0.updatedAt,
+                    title: $0.title,
+                    subtitle: $0.subtitle,
+                    body: $0.body,
+                    postedAt: $0.postedAt)
             }
         )
         let encoder = JSONEncoder()
@@ -117,7 +128,17 @@ public enum StateCodec {
                     // State written before this field existed predates the
                     // opt-out, so the documented default applies.
                     clearOnFocus: $0.clearOnFocus ?? true,
-                    updatedAt: $0.updatedAt)
+                    updatedAt: $0.updatedAt,
+                    title: $0.title ?? "",
+                    subtitle: $0.subtitle ?? "",
+                    body: $0.body ?? "",
+                    // State written before this field existed has no posted
+                    // time. Backfilled once, here, rather than resolved on
+                    // every read: an anchor moves `updatedAt`, so a read-time
+                    // fallback would make an hours-old notification start
+                    // reporting itself as "now" the moment the next prompt is
+                    // submitted — the exact bug `postedAt` exists to prevent.
+                    postedAt: $0.postedAt ?? $0.updatedAt)
             }
         )
         return state
@@ -125,16 +146,13 @@ public enum StateCodec {
 }
 
 extension SessionState {
-    /// Rehydrate from persisted bookkeeping. Separate from the mutating API so
-    /// `sessions` stays read-only to everything else.
+    /// Rehydrate from persisted bookkeeping.
+    ///
+    /// One assignment, not a replay through the mutating API: rebuilding each
+    /// record field by field meant every new `SessionRecord` field needed its
+    /// own setter, and a field whose setter was forgotten decoded correctly and
+    /// was then silently thrown away here.
     mutating func restore(sessions: [String: SessionRecord]) {
-        self = SessionState()
-        for (id, record) in sessions {
-            self.anchor(sessionID: id, tabID: record.tabID, now: record.updatedAt)
-            for notificationID in record.notificationIDs {
-                self.adopt(notificationID: notificationID, sessionID: id)
-            }
-            self.setClearOnFocus(record.clearOnFocus, sessionID: id)
-        }
+        self.sessions = sessions
     }
 }

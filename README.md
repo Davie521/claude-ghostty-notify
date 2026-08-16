@@ -110,9 +110,13 @@ What changes:
 - **Exact withdrawal.** It posts through `UNUserNotificationCenter` and removes
   notifications by identifier, so a repeat notification for a session replaces
   the previous one rather than stacking.
-- **A menu bar item** showing whether it is authorized, which alert style macOS
-  has it on, and how many notifications are waiting — because a background agent
-  that cannot display anything otherwise looks exactly like one that is working.
+- **A menu bar item** that counts the sessions waiting on you and lists them —
+  each row repeating that session's notification verbatim, and jumping to its tab
+  when clicked. Under the Temporary alert style, where the notification itself
+  slides away before it can be clicked, this is the only way back. It also shows
+  whether the agent is authorized and which alert style macOS has it on, because
+  a background agent that cannot display anything otherwise looks exactly like
+  one that is working.
 
 Install asks for two permissions, both one-time: notifications, and controlling
 Ghostty (needed for click-to-jump). Answer both.
@@ -148,7 +152,7 @@ All thresholds are environment variables in your `settings.json` `env` block. Re
 | `GHOSTTY_NOTIFY_CLEAR_ON_FOCUS` | `1`   | Auto-dismiss the notification once you focus the session's Ghostty tab — and on your next prompt in that session. When the tab is unknown (tmux, unscriptable Ghostty) it degrades to "Ghostty becomes frontmost again". Turn it off with `0`, `false`, `no`, or `off`; any other value leaves it on. |
 | `GHOSTTY_NOTIFY_FOCUS_POLL`    | `1`    | Clear-on-focus poll interval in seconds (decimals allowed). `0` would spin the watcher, so it falls back to the default. Ignored when the native agent is delivering — it has no poll. |
 | `GHOSTTY_NOTIFY_AGENT_APP`     | *(discovered)* | Path to the agent bundle. Set it **empty** to pin the shell path and ignore an installed agent. Unset means "use it if it is there"; a path that is not an executable bundle is refused rather than trusted. |
-| `GHOSTTY_NOTIFY_MENU_BAR`      | `1`    | The agent's menu bar item. `0`, `false`, `no` or `off` hides it — at the cost of losing the only visible sign that the agent is alive and permitted. |
+| `GHOSTTY_NOTIFY_MENU_BAR`      | `1`    | The agent's menu bar item. `0`, `false`, `no` or `off` hides it — at the cost of losing the waiting-session count, the list that jumps to them, and the only visible sign that the agent is alive and permitted. |
 
 Values must be plain integers (seconds); anything else falls back to the default (`GHOSTTY_NOTIFY_FOCUS_POLL` also accepts decimals).
 

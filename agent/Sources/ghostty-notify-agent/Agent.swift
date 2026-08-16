@@ -19,7 +19,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     private var activationObserver: NSObjectProtocol?
     private var terminationSource: DispatchSourceSignal?
     private var menuBar: MenuBar?
-    private var authorized = false
+    private var permission: NotificationPermission = .unknown
     private var alertStyle = ""
     /// Per-identifier expiry timers, so a replacement notification restarts the
     /// clock instead of inheriting the old one's deadline.
@@ -54,20 +54,28 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             // bundle identifier for good).
             switch answer {
             case .granted:
-                self.authorized = true
+                self.permission = .granted
                 self.log("authorization granted=true")
                 self.publishReadiness(AgentConstants.readyAuthorized)
                 self.publishAlertStyle()
+                // Only now: an unauthorized center reports nothing delivered,
+                // and reconciling against that would discard every restored
+                // session's bookkeeping.
+                self.reconcileWithNotificationCenter()
             case .denied:
-                self.authorized = false
+                self.permission = .denied
                 self.log("authorization granted=false")
                 self.publishReadiness(AgentConstants.readyDenied)
                 self.log("notifications are not authorized — see System Settings › Notifications")
             case .unavailable:
-                self.authorized = false
+                self.permission = .unavailable
                 self.publishReadiness(AgentConstants.readyError)
                 self.log("authorization request was not processed; no dialog was shown — a relaunch can succeed")
             }
+            // The answer is the difference between an icon that means "working"
+            // and one that means "nothing will ever appear". It arrives
+            // asynchronously, well after the icon was first drawn.
+            self.menuBar?.refresh()
         }
 
         observeActivation()
@@ -129,13 +137,13 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             let identifiers = state.takeNotifications(sessionID: sessionID)
             cancelExpiry(identifiers)
             notifier.withdraw(identifiers)
-            saveState()
+            stateChanged()
 
         case .anchor(let sessionID, let tabID):
             if let tabID {
                 state.anchor(sessionID: sessionID, tabID: tabID, now: Agent.now())
                 log("anchored \(sessionID) -> \(tabID)")
-                saveState()
+                stateChanged()
             } else {
                 // No id from the hook (tmux, or the marker round-trip never
                 // succeeded). Sampling the focused tab is a guess — the drain
@@ -144,7 +152,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 let known = state.sessions[sessionID]?.tabID
                 guard known == nil else {
                     state.anchor(sessionID: sessionID, tabID: known, now: Agent.now())
-                    saveState()
+                    stateChanged()
                     return
                 }
                 Ghostty.selectedTabID { [weak self] selected in
@@ -152,7 +160,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     self.state.anchor(
                         sessionID: sessionID, tabID: selected, now: Agent.now())
                     self.log("anchored \(sessionID) -> \(selected ?? "<unknown>") (sampled)")
-                    self.saveState()
+                    self.stateChanged()
                 }
             }
 
@@ -195,11 +203,19 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     private func deliver(_ notify: NotifyRequest) {
         let identifier = state.newNotification(
-            sessionID: notify.sessionID, clearOnFocus: notify.clearOnFocus, now: Agent.now())
+            sessionID: notify.sessionID,
+            clearOnFocus: notify.clearOnFocus,
+            // Kept so the menu bar can name this session rather than counting
+            // it. The hook already builds all three; nothing new crosses the
+            // wire for them.
+            title: notify.title,
+            subtitle: notify.subtitle,
+            body: notify.body,
+            now: Agent.now())
         notifier.post(identifier: identifier, sessionID: notify.sessionID, request: notify)
         log("posted \(identifier)")
         scheduleExpiry(identifier: identifier, after: notify.timeout)
-        saveState()
+        stateChanged()
     }
 
     /// Mirrors the shell path's `--timeout`: without it a notification for a
@@ -220,7 +236,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 let identifiers = self.state.takeNotifications(sessionID: sessionID)
                 self.notifier.withdraw(identifiers)
                 self.log("expired \(identifier)")
-                self.saveState()
+                self.stateChanged()
             }
         }
         timer.resume()
@@ -279,7 +295,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             if !identifiers.isEmpty {
                 self.cancelExpiry(identifiers)
                 self.notifier.withdraw(identifiers)
-                self.saveState()
+                self.stateChanged()
                 return
             }
             // Ghostty's scripting state can trail the activation by a few
@@ -320,7 +336,7 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         let session = sessionID ?? state.sessionID(forNotification: identifier)
         state.forgetNotification(identifier)
         cancelExpiry([identifier])
-        saveState()
+        stateChanged()
 
         switch action {
         case UNNotificationDismissActionIdentifier:
@@ -403,6 +419,26 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     // MARK: - Housekeeping
 
+    /// Drop bookkeeping for notifications macOS no longer has on screen.
+    ///
+    /// The user can clear one from Notification Center. `.customDismissAction`
+    /// catches that while this process is running; nothing catches a "Clear All"
+    /// performed while the agent was down, and `loadState` then re-adopts
+    /// identifiers for notifications that no longer exist. That used to be
+    /// invisible — now it is a count on the menu bar insisting something is
+    /// waiting when nothing is.
+    private func reconcileWithNotificationCenter() {
+        guard state.hasOutstandingNotifications else { return }
+        notifier.deliveredIdentifiers { [weak self] delivered in
+            guard let self else { return }
+            let gone = self.state.forgetNotifications(notIn: delivered)
+            guard !gone.isEmpty else { return }
+            self.cancelExpiry(gone)
+            self.log("reconciled: \(gone.joined(separator: ",")) no longer on screen")
+            self.stateChanged()
+        }
+    }
+
     private func startPruning() {
         let timer = DispatchSource.makeTimerSource(queue: .main)
         timer.schedule(deadline: .now() + 3600, repeating: 3600, leeway: .seconds(300))
@@ -413,7 +449,10 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     maxAge: AgentConstants.sessionMaxAge, now: Agent.now())
                 self.cancelExpiry(orphaned)
                 self.notifier.withdraw(orphaned)
-                self.saveState()
+                self.stateChanged()
+                // Catches a notification cleared during a long idle stretch, so
+                // the count cannot drift for a whole day.
+                self.reconcileWithNotificationCenter()
             }
         }
         timer.resume()
@@ -440,6 +479,9 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             try? (style + "\n").write(
                 toFile: self.paths.alertStyleFile, atomically: true, encoding: .utf8)
             self.log("alert style = \(style)")
+            // "none" is the one style the icon itself reports, so it has to be
+            // redrawn once the answer is in.
+            self.menuBar?.refresh()
             guard style == "banner" else { return }
             self.log(
                 "temporary style: notifications slide away after a few seconds, so "
@@ -482,19 +524,42 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             return
         }
         menuBar = MenuBar(
-            status: { [weak self] in
+            // Two closures, because the two callers cost different amounts. The
+            // icon is refreshed on every state change and needs a count;
+            // building the rows allocates one value per session and sorts them,
+            // and is only worth doing when the menu actually opens.
+            iconState: { [weak self] in
+                guard let self else { return .idle }
+                return MenuBarState.resolve(
+                    permission: self.permission,
+                    alertStyle: self.alertStyle,
+                    waiting: self.state.waitingCount)
+            },
+            menuStatus: { [weak self] in
                 guard let self else {
                     return AgentStatus(
-                        authorized: false, alertStyle: "", outstandingNotifications: 0,
-                        trackedSessions: 0)
+                        permission: .unknown, alertStyle: "", waiting: [], trackedSessions: 0)
                 }
                 return AgentStatus(
-                    authorized: self.authorized,
+                    permission: self.permission,
                     alertStyle: self.alertStyle,
-                    outstandingNotifications: self.state.sessions.values
-                        .reduce(0) { $0 + $1.notificationIDs.count },
+                    waiting: self.state.waitingSessions(),
                     trackedSessions: self.state.sessions.count
                 )
+            },
+            onJump: { [weak self] sessionID in
+                guard let self else { return }
+                // Taking the notification down here rather than leaving it to
+                // the activation observer: the row was the click, so the alert
+                // has done its job whether or not Ghostty ends up frontmost —
+                // and a session with no resolved tab would otherwise keep its
+                // notification after the user has plainly dealt with it.
+                let identifiers = self.state.takeNotifications(sessionID: sessionID)
+                self.cancelExpiry(identifiers)
+                self.notifier.withdraw(identifiers)
+                self.stateChanged()
+                self.log("menu: jumping to \(sessionID)")
+                self.jump(sessionID: sessionID)
             },
             onShowGuidance: { [weak self] in self?.offerStyleGuidance(force: true) },
             onOpenSettings: { [weak self] in
@@ -524,6 +589,16 @@ final class Agent: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         guard let data = FileManager.default.contents(atPath: paths.state) else { return }
         state = StateCodec.decode(data)
         log("restored \(state.sessions.count) sessions")
+    }
+
+    /// Persist bookkeeping and let the menu bar catch up.
+    ///
+    /// Every mutation goes through here so the icon can never disagree with what
+    /// the agent knows. The alternative — refreshing only when the menu opens —
+    /// is what made the icon a snapshot of the last time the user looked at it.
+    private func stateChanged() {
+        saveState()
+        menuBar?.refresh()
     }
 
     private func saveState() {
