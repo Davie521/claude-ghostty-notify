@@ -14,17 +14,51 @@ public struct SessionRecord: Equatable, Sendable {
     /// GHOSTTY_NOTIFY_CLEAR_ON_FOCUS=0: focus must never withdraw it.
     public var clearOnFocus: Bool
     public var updatedAt: Double
+    /// What the outstanding notification says, kept so the menu bar can name the
+    /// session instead of counting anonymous ones. The hook already sends all
+    /// three on every notify; before this they were handed to the notification
+    /// center and forgotten, which left "3 notifications waiting" as the most
+    /// the agent could say about work the user had to choose between.
+    public var title: String
+    public var subtitle: String
+    public var body: String
+    /// When the outstanding notification was posted. Separate from `updatedAt`,
+    /// which an anchor moves without anything new being on screen.
+    public var postedAt: Double
 
     public init(
         tabID: String? = nil,
         notificationIDs: [String] = [],
         clearOnFocus: Bool = true,
-        updatedAt: Double = 0
+        updatedAt: Double = 0,
+        title: String = "",
+        subtitle: String = "",
+        body: String = "",
+        postedAt: Double = 0
     ) {
         self.tabID = tabID
         self.notificationIDs = notificationIDs
         self.clearOnFocus = clearOnFocus
         self.updatedAt = updatedAt
+        self.title = title
+        self.subtitle = subtitle
+        self.body = body
+        self.postedAt = postedAt
+    }
+
+    /// Drop the notification's text once nothing is on screen for this session.
+    ///
+    /// The record outlives the notification by up to `sessionMaxAge` so its
+    /// resolved tab survives, and the text is the user's session title, their
+    /// project folder and whatever Claude was asking — none of which reached
+    /// disk at all before the menu needed it. Keeping it for a day after the
+    /// notification is gone buys nothing, since no reader looks at it once
+    /// `notificationIDs` is empty.
+    mutating func clearNotice() {
+        title = ""
+        subtitle = ""
+        body = ""
+        postedAt = 0
     }
 }
 
@@ -41,7 +75,11 @@ public enum FocusEvent: Equatable, Sendable {
 /// All session bookkeeping, kept pure so every dismissal rule is testable
 /// without a notification center, a run loop, or a live Ghostty.
 public struct SessionState: Equatable, Sendable {
-    public private(set) var sessions: [String: SessionRecord] = [:]
+    /// Writable inside the module so persistence can rehydrate the whole map in
+    /// one assignment. Rebuilding it field by field through a setter per field
+    /// meant every new `SessionRecord` field needed a matching mutator, and a
+    /// forgotten one was dropped on restart with nothing to catch it.
+    public internal(set) var sessions: [String: SessionRecord] = [:]
 
     public init() {}
 
@@ -66,8 +104,17 @@ public struct SessionState: Equatable, Sendable {
     /// Register the session's notification as outstanding and return its
     /// identifier. Idempotent: posting again reuses the identifier, so the
     /// notification center replaces rather than stacks.
+    ///
+    /// The text is recorded alongside, because a replacement notification also
+    /// replaces what the menu bar should say about the session — the identifier
+    /// staying the same is exactly why the old text must not survive it.
     public mutating func newNotification(
-        sessionID: String, clearOnFocus: Bool = true, now: Double
+        sessionID: String,
+        clearOnFocus: Bool = true,
+        title: String = "",
+        subtitle: String = "",
+        body: String = "",
+        now: Double
     ) -> String {
         let id = Self.notificationID(sessionID: sessionID)
         var record = sessions[sessionID] ?? SessionRecord()
@@ -76,8 +123,44 @@ public struct SessionState: Equatable, Sendable {
         }
         record.clearOnFocus = clearOnFocus
         record.updatedAt = now
+        record.title = title
+        record.subtitle = subtitle
+        record.body = body
+        record.postedAt = now
         sessions[sessionID] = record
         return id
+    }
+
+    /// How many sessions are waiting on the user.
+    ///
+    /// Separate from `waitingSessions()` because the icon is refreshed on every
+    /// state change and needs only this, while building the rows allocates one
+    /// value per session and sorts them.
+    public var waitingCount: Int {
+        sessions.values.reduce(0) { $0 + ($1.notificationIDs.isEmpty ? 0 : 1) }
+    }
+
+    /// The sessions the menu bar lists, newest first.
+    ///
+    /// Ties break on the session id so the menu cannot reorder itself between
+    /// two openings that happen in the same second — a moving target is worse
+    /// than a stale one when the rows are click targets.
+    public func waitingSessions() -> [WaitingSession] {
+        sessions.compactMap { sessionID, record -> WaitingSession? in
+            guard !record.notificationIDs.isEmpty else { return nil }
+            return WaitingSession(
+                sessionID: sessionID,
+                title: record.title,
+                subtitle: record.subtitle,
+                body: record.body,
+                postedAt: record.postedAt
+            )
+        }
+        .sorted {
+            $0.postedAt == $1.postedAt
+                ? $0.sessionID < $1.sessionID
+                : $0.postedAt > $1.postedAt
+        }
     }
 
     /// Hand back a session's outstanding identifiers and forget them. The
@@ -88,6 +171,7 @@ public struct SessionState: Equatable, Sendable {
         }
         let ids = record.notificationIDs
         record.notificationIDs = []
+        record.clearNotice()
         sessions[sessionID] = record
         return ids
     }
@@ -100,9 +184,33 @@ public struct SessionState: Equatable, Sendable {
                 continue
             }
             record.notificationIDs.remove(at: index)
+            if record.notificationIDs.isEmpty { record.clearNotice() }
             sessions[sessionID] = record
             return
         }
+    }
+
+    /// Forget every identifier that is no longer among `delivered`, and return
+    /// them.
+    ///
+    /// The user can clear a notification from Notification Center without this
+    /// process hearing about it — most reliably while the agent is not running
+    /// at all. Bookkeeping that outlives the notification used to be invisible;
+    /// with a count on the menu bar it is a standing lie.
+    public mutating func forgetNotifications(notIn delivered: Set<String>) -> [String] {
+        var gone: [String] = []
+        for sessionID in sessions.keys.sorted() {
+            guard var record = sessions[sessionID], !record.notificationIDs.isEmpty else {
+                continue
+            }
+            let missing = record.notificationIDs.filter { !delivered.contains($0) }
+            guard !missing.isEmpty else { continue }
+            gone.append(contentsOf: missing)
+            record.notificationIDs.removeAll { !delivered.contains($0) }
+            if record.notificationIDs.isEmpty { record.clearNotice() }
+            sessions[sessionID] = record
+        }
+        return gone
     }
 
     /// The session a notification identifier belongs to, for routing a click
@@ -143,22 +251,6 @@ public struct SessionState: Equatable, Sendable {
         // Deterministic order so assertions do not depend on dictionary layout.
         return sessionsMatching(selectedTabID: selectedTabID)
             .flatMap { takeNotifications(sessionID: $0) }
-    }
-
-    /// Re-attach an identifier loaded from persisted state, without touching
-    /// `updatedAt`.
-    mutating func adopt(notificationID: String, sessionID: String) {
-        var record = sessions[sessionID] ?? SessionRecord()
-        if !record.notificationIDs.contains(notificationID) {
-            record.notificationIDs.append(notificationID)
-        }
-        sessions[sessionID] = record
-    }
-
-    mutating func setClearOnFocus(_ value: Bool, sessionID: String) {
-        guard var record = sessions[sessionID] else { return }
-        record.clearOnFocus = value
-        sessions[sessionID] = record
     }
 
     /// Forget sessions untouched for `maxAge` seconds. Outstanding identifiers
